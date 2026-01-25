@@ -1,0 +1,18 @@
+[package]
+name = "dcreplaybot"
+version = "0.1.0"
+edition = "2021"
+description = "Discord bot for parsing and visualizing BFME2 replay files"
+
+[dependencies]
+poise = "0.6"
+serenity = { version = "0.12", features = ["client", "gateway", "model"] }
+tokio = { version = "1", features = ["full"] }
+winnow = "0.6"
+image = "0.25"
+imageproc = "0.25"
+ab_glyph = "0.2"
+reqwest = { version = "0.12", features = ["stream"] }
+dotenvy = "0.15"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
