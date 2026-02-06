@@ -5,14 +5,29 @@ edition = "2021"
 description = "Discord bot for parsing and visualizing BFME2 replay files"
 
 [dependencies]
+# Discord bot framework
 poise = "0.6"
-serenity = { version = "0.12", features = ["client", "gateway", "model"] }
-tokio = { version = "1", features = ["full"] }
-winnow = "0.6"
-image = "0.25"
+serenity = { version = "0.12", default-features = false, features = ["client", "gateway", "model", "rustls_backend"] }
+tokio = { version = "1", features = ["rt", "macros", "fs", "net", "io-util"] }
+
+# Archive extraction
+zip = "2"
+unrar = "0.5"
+tempfile = "3"
+
+# Image processing - slimmed down features
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 imageproc = "0.25"
 ab_glyph = "0.2"
-reqwest = { version = "0.12", features = ["stream"] }
+
+# Environment and logging
 dotenvy = "0.15"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[profile.release]
+opt-level = "z"     # Optimize for size
+lto = true          # Link-time optimization
+codegen-units = 1   # Better optimization
+panic = "abort"     # Smaller binary
+strip = true        # Strip symbols

@@ -1,3 +1,5 @@
 mod replay;
 
-pub use replay::{Faction, Player, ReplayInfo};
+pub use replay::{
+    Faction, MapPosition, Player, ReplayError, ReplayInfo, Spectator, Winner, PLAYER_COLORS,
+};
