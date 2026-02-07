@@ -39,15 +39,18 @@ pub fn load_map_image(map_name: &str, assets_path: &Path) -> Result<RgbaImage, S
     }
 }
 
-/// Position coordinates on map image (percentage of image size)
-/// Fine-tuned to center on spawn positions in the map image
+/// Circle center coordinates in pixels on the original 1624x1620 map asset.
+/// At render time these are scaled to match the actual (resized) image dimensions.
+const MAP_ASSET_WIDTH: f32 = 1624.0;
+const MAP_ASSET_HEIGHT: f32 = 1620.0;
+
 const POSITION_COORDS: [(f32, f32); 6] = [
-    (0.090, 0.190), // TOP_LEFT
-    (0.050, 0.540), // MID_LEFT
-    (0.145, 0.830), // BOTTOM_LEFT
-    (0.740, 0.195), // TOP_RIGHT
-    (0.780, 0.510), // MID_RIGHT
-    (0.750, 0.865), // BOTTOM_RIGHT
+    (272.0, 336.0),   // TOP_LEFT
+    (198.0, 896.0),   // MID_LEFT
+    (344.0, 1370.0),  // BOTTOM_LEFT
+    (1330.0, 336.0),  // TOP_RIGHT
+    (1370.0, 850.0),  // MID_RIGHT
+    (1314.0, 1420.0), // BOTTOM_RIGHT
 ];
 
 /// Get position name from game coordinates
@@ -162,6 +165,8 @@ fn draw_player_text(
     font_small: PxScale,
 ) {
     let (width, height) = (img.width() as f32, img.height() as f32);
+    let scale_x = width / MAP_ASSET_WIDTH;
+    let scale_y = height / MAP_ASSET_HEIGHT;
 
     // Get position from map coordinates
     let img_pos = if let Some(pos) = &player.map_position {
@@ -180,11 +185,9 @@ fn draw_player_text(
         None => return, // Skip players without valid positions
     };
 
-    let x = (img_pos.0 * width) as i32;
-    let y = (img_pos.1 * height) as i32;
-
-    // Center point for text
-    let center_x = x + 45;
+    // Circle center in rendered image pixels
+    let center_x = (img_pos.0 * scale_x) as i32;
+    let center_y = (img_pos.1 * scale_y) as i32;
 
     // Get player color
     let color = player.display_color();
@@ -194,53 +197,49 @@ fn draw_player_text(
     let name: String = player.name.chars().take(12).collect();
 
     let pad = 3;
+    let name_h = 24;
+    let faction_h = 20;
+    let gap = 2; // gap between name and faction rows
+    let total_h = name_h + gap + faction_h;
 
-    // Measure actual name width
+    // Vertically center the two-line block on circle center
+    let block_top = center_y - total_h / 2;
+
+    // --- Name (top row, centered horizontally) ---
     let name_w = measure_text_width(&name, font, font_large);
-    let name_height = 24;
-    let name_text_x = center_x - name_w / 2;
+    let name_x = center_x - name_w / 2;
+    let name_y = block_top;
 
-    // Draw background box for name (centered)
     draw_rect_alpha(
         img,
-        name_text_x - pad,
-        y - 12,
+        name_x - pad,
+        name_y - 2,
         name_w + pad * 2,
-        name_height + 4,
+        name_h + 4,
         Rgba([0, 0, 0, 180]),
     );
 
-    // Draw player name
-    draw_text_mut(
-        img,
-        text_color,
-        name_text_x,
-        y - 10,
-        font_large,
-        font,
-        &name,
-    );
+    draw_text_mut(img, text_color, name_x, name_y, font_large, font, &name);
 
-    // Draw faction below name (centered)
+    // --- Faction (bottom row, centered horizontally) ---
     let faction_text = player.display_faction().to_string();
-    let faction_y = y + 18;
     let faction_w = measure_text_width(&faction_text, font, font_small);
-    let faction_height = 20;
-    let faction_text_x = center_x - faction_w / 2;
+    let faction_x = center_x - faction_w / 2;
+    let faction_y = block_top + name_h + gap;
 
     draw_rect_alpha(
         img,
-        faction_text_x - pad,
+        faction_x - pad,
         faction_y - 2,
         faction_w + pad * 2,
-        faction_height + 4,
+        faction_h + 4,
         Rgba([0, 0, 0, 180]),
     );
 
     draw_text_mut(
         img,
         text_color,
-        faction_text_x,
+        faction_x,
         faction_y,
         font_small,
         font,
