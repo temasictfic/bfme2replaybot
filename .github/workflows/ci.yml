@@ -88,8 +88,8 @@ jobs:
       - name: Install Koyeb CLI
         run: curl -fsSL https://raw.githubusercontent.com/koyeb/koyeb-cli/master/install.sh | sh
 
-      - name: Redeploy service
+      - name: Find and redeploy service
         env:
           KOYEB_TOKEN: ${{ secrets.KOYEB_API_TOKEN }}
         run: |
-          ~/.koyeb/bin/koyeb service redeploy dcreplaybot/dcreplaybot
+          ~/.koyeb/bin/koyeb service redeploy physical-trixi/bfme2replaybot
