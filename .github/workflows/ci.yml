@@ -92,4 +92,4 @@ jobs:
         env:
           KOYEB_TOKEN: ${{ secrets.KOYEB_API_TOKEN }}
         run: |
-          koyeb service redeploy dcreplaybot/dcreplaybot
+          ~/.koyeb/bin/koyeb service redeploy dcreplaybot/dcreplaybot
