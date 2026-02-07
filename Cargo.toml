@@ -11,13 +11,13 @@ serenity = { version = "0.12", default-features = false, features = ["client", "
 tokio = { version = "1", features = ["rt", "macros", "fs", "net", "io-util"] }
 
 # Archive extraction
-zip = "2"
+zip = "7.4.0"
 unrar = "0.5"
 tempfile = "3"
 
 # Image processing - slimmed down features
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
-imageproc = "0.25"
+imageproc = "0.26.0"
 ab_glyph = "0.2"
 
 # Environment and logging

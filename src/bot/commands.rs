@@ -405,7 +405,7 @@ fn extract_replays_from_rar(data: &[u8]) -> (Vec<(String, Vec<u8>)>, usize) {
 
     // Extract using unrar
     let mut archive =
-        match unrar::Archive::new(rar_path.to_string_lossy().as_ref()).open_for_processing() {
+        match unrar::Archive::new::<str>(&rar_path.to_string_lossy()).open_for_processing() {
             Ok(a) => a,
             Err(e) => {
                 tracing::error!("Failed to open RAR archive: {}", e);

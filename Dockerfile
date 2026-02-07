@@ -1,8 +1,10 @@
-# Build stage - using Alpine for smaller image
-FROM rust:1.88-alpine AS builder
+# Build stage
+FROM rust:1.93.0-slim-trixie AS builder
 
 # Install build dependencies
-RUN apk add --no-cache musl-dev g++
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc libc6-dev && \
+    rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
@@ -25,14 +27,16 @@ RUN touch src/main.rs && cargo build --release --locked
 # Strip the binary for smaller size
 RUN strip /app/target/release/dcreplaybot
 
-# Runtime stage - minimal Alpine image
-FROM alpine:3.19
+# Runtime stage
+FROM debian:trixie-slim
 
 # Install runtime dependencies
-RUN apk add --no-cache ca-certificates
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
 
 # Non-root user for security
-RUN adduser -D -u 1000 botuser
+RUN useradd -m -u 1000 botuser
 
 WORKDIR /app
 
