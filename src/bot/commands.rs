@@ -83,6 +83,7 @@ async fn event_handler(
 
         // Collect attachments: from this message, replied-to message, or forwarded message.
         // For replied-to forwarded messages, attachments are in the snapshot, not directly.
+        let mut is_forwarded = false;
         let attachments = if !new_message.attachments.is_empty() {
             new_message.attachments.clone()
         } else if let Some(ref replied) = new_message.referenced_message {
@@ -94,6 +95,7 @@ async fn event_handler(
                 return Ok(());
             }
         } else if let Some(snapshot) = new_message.message_snapshots.first() {
+            is_forwarded = true;
             snapshot.attachments.clone()
         } else {
             return Ok(());
@@ -108,8 +110,10 @@ async fn event_handler(
             return Ok(());
         }
 
-        // Only respond when the bot is @mentioned (user mention or role mention)
-        if !is_bot_mentioned(ctx, new_message, data.bot_id).await {
+        // Forwarded messages can't contain @mentions (Discord doesn't allow adding text),
+        // so auto-process them if they contain relevant replay files.
+        // All other messages require the bot to be @mentioned.
+        if !is_forwarded && !is_bot_mentioned(ctx, new_message, data.bot_id).await {
             return Ok(());
         }
 
