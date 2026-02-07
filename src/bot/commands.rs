@@ -81,12 +81,18 @@ async fn event_handler(
             return Ok(());
         }
 
-        // Collect attachments: from this message, replied-to message, or forwarded message
-        // (check attachments BEFORE the mention check to avoid unnecessary API calls)
+        // Collect attachments: from this message, replied-to message, or forwarded message.
+        // For replied-to forwarded messages, attachments are in the snapshot, not directly.
         let attachments = if !new_message.attachments.is_empty() {
             new_message.attachments.clone()
         } else if let Some(ref replied) = new_message.referenced_message {
-            replied.attachments.clone()
+            if !replied.attachments.is_empty() {
+                replied.attachments.clone()
+            } else if let Some(snapshot) = replied.message_snapshots.first() {
+                snapshot.attachments.clone()
+            } else {
+                return Ok(());
+            }
         } else if let Some(snapshot) = new_message.message_snapshots.first() {
             snapshot.attachments.clone()
         } else {
