@@ -81,12 +81,14 @@ async fn event_handler(
             return Ok(());
         }
 
-        // Collect attachments: from this message, or from the replied-to message
+        // Collect attachments: from this message, replied-to message, or forwarded message
         // (check attachments BEFORE the mention check to avoid unnecessary API calls)
         let attachments = if !new_message.attachments.is_empty() {
             new_message.attachments.clone()
         } else if let Some(ref replied) = new_message.referenced_message {
             replied.attachments.clone()
+        } else if let Some(snapshot) = new_message.message_snapshots.first() {
+            snapshot.attachments.clone()
         } else {
             return Ok(());
         };
