@@ -1,5 +1,5 @@
 use crate::models::{
-    Faction, MapPosition, Player, ReplayError, ReplayInfo, Spectator, Winner, PLAYER_COLORS,
+    Faction, MapPosition, PLAYER_COLORS, Player, ReplayError, ReplayInfo, Spectator, Winner,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -531,14 +531,14 @@ fn parse_and_analyze_chunks(
                 }
 
                 // Extract building ID for faction detection (only from build commands)
-                if chunk.order_type == CMD_BUILD_OBJECT || chunk.order_type == CMD_BUILD_OBJECT_2 {
-                    if let Some(bid) = extract_building_id(&chunk) {
-                        result
-                            .player_building_ids
-                            .entry(slot)
-                            .or_default()
-                            .insert(bid);
-                    }
+                if (chunk.order_type == CMD_BUILD_OBJECT || chunk.order_type == CMD_BUILD_OBJECT_2)
+                    && let Some(bid) = extract_building_id(&chunk)
+                {
+                    result
+                        .player_building_ids
+                        .entry(slot)
+                        .or_default()
+                        .insert(bid);
                 }
             }
 
@@ -606,10 +606,11 @@ fn extract_position(chunk: &Chunk) -> Option<MapPosition> {
 /// Extract building ID from a chunk
 fn extract_building_id(chunk: &Chunk) -> Option<u32> {
     for arg in &chunk.args {
-        if let ChunkArg::Int(v) = arg {
-            if *v > 2000 && *v < 3000 {
-                return Some(*v);
-            }
+        if let ChunkArg::Int(v) = arg
+            && *v > 2000
+            && *v < 3000
+        {
+            return Some(*v);
         }
     }
     None
@@ -832,11 +833,12 @@ fn determine_team_sides(players: &[Player]) -> HashMap<i8, &'static str> {
     let mut team_sides: HashMap<i8, &'static str> = HashMap::new();
 
     for player in players {
-        if let Some(pos) = &player.map_position {
-            if pos.is_valid() && !team_sides.contains_key(&player.team_raw) {
-                let side = if pos.x < 2500.0 { "Left" } else { "Right" };
-                team_sides.insert(player.team_raw, side);
-            }
+        if let Some(pos) = &player.map_position
+            && pos.is_valid()
+            && !team_sides.contains_key(&player.team_raw)
+        {
+            let side = if pos.x < 2500.0 { "Left" } else { "Right" };
+            team_sides.insert(player.team_raw, side);
         }
     }
 
@@ -865,14 +867,14 @@ fn determine_winner(
             Some(&s) => s,
             None => return Winner::Unknown,
         };
-        if let Some(hp) = header_players.iter().find(|hp| hp.slot == endgame_slot) {
-            if let Some(&side) = team_sides.get(&hp.team_raw) {
-                return if side == "Left" {
-                    Winner::LeftTeam
-                } else {
-                    Winner::RightTeam
-                };
-            }
+        if let Some(hp) = header_players.iter().find(|hp| hp.slot == endgame_slot)
+            && let Some(&side) = team_sides.get(&hp.team_raw)
+        {
+            return if side == "Left" {
+                Winner::LeftTeam
+            } else {
+                Winner::RightTeam
+            };
         }
     }
 
@@ -896,14 +898,14 @@ fn determine_winner(
             if all_defeated {
                 // This team lost, the other team won
                 for other_team_raw in team_players.keys() {
-                    if other_team_raw != team_raw {
-                        if let Some(&side) = team_sides.get(other_team_raw) {
-                            return if side == "Left" {
-                                Winner::LeftTeam
-                            } else {
-                                Winner::RightTeam
-                            };
-                        }
+                    if other_team_raw != team_raw
+                        && let Some(&side) = team_sides.get(other_team_raw)
+                    {
+                        return if side == "Left" {
+                            Winner::LeftTeam
+                        } else {
+                            Winner::RightTeam
+                        };
                     }
                 }
             }
