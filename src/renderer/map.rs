@@ -260,12 +260,9 @@ fn draw_center_info(
     let center_y = height / 2;
 
     // Format filename: strip extension (case-insensitive), cap at 30 chars
-    let display_name = if filename.len() >= 13
-        && filename[filename.len() - 13..].eq_ignore_ascii_case(".BfME2Replay")
-    {
-        &filename[..filename.len() - 13]
-    } else {
-        filename
+    let display_name = match filename.rsplit_once('.') {
+        Some((stem, ext)) if ext.eq_ignore_ascii_case("BfME2Replay") => stem,
+        _ => filename,
     };
     let display_name: String = display_name.chars().take(30).collect();
 
