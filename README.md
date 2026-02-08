@@ -18,7 +18,7 @@ Currently supports the **Bfme2 1.00 / Rhun** (3v3) map:
 - Determines player starting positions from build commands
 - Detects game winner via EndGame (Order 29) and PlayerDefeated (Order 1096) events
 - Supports Turkish character encoding (Windows-1254)
-- Handles `.zip` and `.rar` archives (up to 10 replays per archive)
+- Handles `.zip` and `.rar` archives (up to 100 replays per archive, batched in groups of 10 with a "Show more" button)
 - Shows spectators/observers on the map
 - Health check endpoint for container hosting
 
