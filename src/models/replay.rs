@@ -203,6 +203,7 @@ pub struct ReplayInfo {
     pub end_time: Option<u32>,   // Unix timestamp
     pub winner: Winner,
     pub game_crashed: bool, // No Order 29 and no full team defeated
+    pub estimated_duration_secs: Option<u32>, // From max chunk timecode / 5
 }
 
 impl ReplayInfo {
@@ -215,6 +216,7 @@ impl ReplayInfo {
             end_time: None,
             winner: Winner::Unknown,
             game_crashed: false,
+            estimated_duration_secs: None,
         }
     }
 
@@ -239,25 +241,43 @@ impl ReplayInfo {
         self
     }
 
+    pub fn with_estimated_duration(mut self, secs: Option<u32>) -> Self {
+        self.estimated_duration_secs = secs;
+        self
+    }
+
     /// Get game duration in seconds
     pub fn duration_seconds(&self) -> Option<u32> {
         match (self.start_time, self.end_time) {
-            (Some(start), Some(end)) => Some(end.saturating_sub(start)),
-            _ => None,
+            (Some(start), Some(end)) if end > start => Some(end - start),
+            _ => self.estimated_duration_secs,
         }
     }
 
-    /// Format duration as "MM:SS" or "HH:MM:SS"
+    /// Whether the displayed duration is an estimate (from chunk timecodes)
+    pub fn is_duration_estimated(&self) -> bool {
+        match (self.start_time, self.end_time) {
+            (Some(start), Some(end)) if end > start => false,
+            _ => self.estimated_duration_secs.is_some(),
+        }
+    }
+
+    /// Format duration as "MM:SS" or "HH:MM:SS", prefixed with "~" if estimated
     pub fn duration_formatted(&self) -> String {
         match self.duration_seconds() {
             Some(total_secs) => {
                 let hours = total_secs / 3600;
                 let mins = (total_secs % 3600) / 60;
                 let secs = total_secs % 60;
-                if hours > 0 {
-                    format!("{}:{:02}:{:02}", hours, mins, secs)
+                let prefix = if self.is_duration_estimated() {
+                    "~"
                 } else {
-                    format!("{}:{:02}", mins, secs)
+                    ""
+                };
+                if hours > 0 {
+                    format!("{}{}:{:02}:{:02}", prefix, hours, mins, secs)
+                } else {
+                    format!("{}{}:{:02}", prefix, mins, secs)
                 }
             }
             None => "Unknown".to_string(),
@@ -328,4 +348,60 @@ fn days_to_ymd(days: i32) -> (i32, u32, u32) {
 
 fn is_leap_year(year: i32) -> bool {
     (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_replay() -> ReplayInfo {
+        ReplayInfo::new("map wor rhun".to_string(), vec![])
+    }
+
+    #[test]
+    fn test_normal_game_duration() {
+        let info = make_replay().with_times(1000, 1817);
+        assert_eq!(info.duration_seconds(), Some(817));
+        assert!(!info.is_duration_estimated());
+        assert_eq!(info.duration_formatted(), "13:37");
+    }
+
+    #[test]
+    fn test_crashed_game_estimated_duration() {
+        // Crashed game: end == start, but we have chunk timecode estimate
+        let info = make_replay()
+            .with_times(1000, 1000)
+            .with_estimated_duration(Some(780));
+        assert_eq!(info.duration_seconds(), Some(780));
+        assert!(info.is_duration_estimated());
+        assert_eq!(info.duration_formatted(), "~13:00");
+    }
+
+    #[test]
+    fn test_crashed_game_no_chunks() {
+        // Crashed game with no chunks at all
+        let info = make_replay().with_times(1000, 1000);
+        assert_eq!(info.duration_seconds(), None);
+        assert!(!info.is_duration_estimated());
+        assert_eq!(info.duration_formatted(), "Unknown");
+    }
+
+    #[test]
+    fn test_normal_game_ignores_estimate() {
+        // Normal game should use header duration even if estimate is present
+        let info = make_replay()
+            .with_times(1000, 1817)
+            .with_estimated_duration(Some(780));
+        assert_eq!(info.duration_seconds(), Some(817));
+        assert!(!info.is_duration_estimated());
+        assert_eq!(info.duration_formatted(), "13:37");
+    }
+
+    #[test]
+    fn test_estimated_duration_with_hours() {
+        let info = make_replay()
+            .with_times(1000, 1000)
+            .with_estimated_duration(Some(3661));
+        assert_eq!(info.duration_formatted(), "~1:01:01");
+    }
 }

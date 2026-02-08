@@ -111,6 +111,7 @@ pub fn parse_replay(data: &[u8]) -> Result<ReplayInfo, ReplayError> {
     // Parse state for streaming chunk processing
     let mut winner = Winner::Unknown;
     let mut game_crashed = false;
+    let mut estimated_duration_secs: Option<u32> = None;
 
     if let Some(start) = chunks_start {
         // Parse chunks for positions, faction detection, and winner
@@ -138,6 +139,11 @@ pub fn parse_replay(data: &[u8]) -> Result<ReplayInfo, ReplayError> {
             winner = Winner::NotConcluded;
         }
 
+        // Estimate duration from max chunk timecode (SAGE engine ~5 ticks/sec)
+        if parse_result.max_timecode > 0 {
+            estimated_duration_secs = Some(parse_result.max_timecode / 5);
+        }
+
         // Remap teams to 1/2 based on side
         remap_teams_by_side(&mut players, &team_sides);
     }
@@ -151,7 +157,8 @@ pub fn parse_replay(data: &[u8]) -> Result<ReplayInfo, ReplayError> {
         .with_times(start_time, end_time)
         .with_winner(winner)
         .with_spectators(spectator_list)
-        .with_game_crashed(game_crashed))
+        .with_game_crashed(game_crashed)
+        .with_estimated_duration(estimated_duration_secs))
 }
 
 /// Search for "M=" marker and extract map name
@@ -475,6 +482,7 @@ struct ChunkParseResult {
     endgame_player: Option<u32>,
     endgame_timecode: u32,
     has_endgame: bool,
+    max_timecode: u32,
 }
 
 /// Parse chunks and analyze for positions, factions, and winner
@@ -492,6 +500,7 @@ fn parse_and_analyze_chunks(
         endgame_player: None,
         endgame_timecode: 0,
         has_endgame: false,
+        max_timecode: 0,
     };
 
     // Separate position tracking: build commands vs unit commands
@@ -502,6 +511,8 @@ fn parse_and_analyze_chunks(
 
     while pos < data.len().saturating_sub(13) {
         if let Some((next_pos, chunk)) = parse_chunk(data, pos) {
+            result.max_timecode = result.max_timecode.max(chunk.time_code);
+
             // Map player_num to slot using pn_to_slot (handles empty slot gaps)
             let slot = match pn_to_slot.get(&chunk.player_num) {
                 Some(&s) => s,
@@ -572,8 +583,14 @@ fn parse_and_analyze_chunks(
     }
 
     // Raw binary scan fallback: scan for Order 1096/29 patterns that the chunk
-    // parser may have missed due to sync issues
-    let valid_player_nums: HashSet<u32> = pn_to_slot.keys().cloned().collect();
+    // parser may have missed due to sync issues.
+    // Only include pns that map to actual players (not spectators) to stay
+    // consistent with the chunk parser's is_valid_player filter.
+    let valid_player_nums: HashSet<u32> = pn_to_slot
+        .iter()
+        .filter(|&(_, &slot)| header_players.iter().any(|hp| hp.slot == slot))
+        .map(|(&pn, _)| pn)
+        .collect();
     raw_scan_for_critical_events(data, start, &valid_player_nums, &mut result);
 
     // Build player_builds from positions and building IDs
