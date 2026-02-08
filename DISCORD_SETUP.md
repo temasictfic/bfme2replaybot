@@ -45,3 +45,22 @@ The bot only responds when **@mentioned**. Upload a file and tag the bot in the 
 - `.zip` or `.rar` — archive containing multiple replays (max 25MB)
 
 Example: upload your replay file and type `@DCReplayBot` in the message text.
+
+## Troubleshooting
+
+### Bot Not Visible After Install (Install Says "Successful")
+
+This is caused by the **Installation Context** setting. Discord has two install types:
+
+- **Guild Install** — adds the bot as a member of the server (correct)
+- **User Install** — adds the bot to your user account only, not the server
+
+If only User Install is enabled, the install link will say "successful" but the bot won't appear in the server's member list.
+
+**Fix:**
+1. Go to https://discord.com/developers/applications → your app
+2. Go to **Installation** (left sidebar)
+3. Under **Installation Contexts**, make sure **Guild Install** is checked
+4. Under **Default Install Settings** for Guild Install, add scopes (`bot`, `applications.commands`) and bot permissions
+5. Save changes
+6. Re-add the bot to the server using the updated install link
