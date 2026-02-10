@@ -3,7 +3,7 @@ FROM rust:1.93.0-slim-trixie AS builder
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    gcc g++ libc6-dev && \
+    gcc g++ libc6-dev make && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
