@@ -1,3 +1,8 @@
-mod commands;
+mod archive;
+mod constants;
+mod handler;
+mod messages;
+mod pagination;
+mod setup;
 
-pub use commands::setup_bot;
+pub use setup::setup_bot;

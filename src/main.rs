@@ -1,13 +1,10 @@
 use std::env;
 use std::path::PathBuf;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
 
-mod bot;
-mod models;
-mod parser;
-mod renderer;
+use dcreplaybot::bot::setup_bot;
 
 /// Minimal HTTP health check server
 async fn health_check_server(port: u16) {
@@ -26,6 +23,9 @@ async fn health_check_server(port: u16) {
     loop {
         match listener.accept().await {
             Ok((mut stream, _)) => {
+                // Read and discard the request bytes before responding
+                let mut discard = [0u8; 1024];
+                let _ = stream.read(&mut discard).await;
                 let response = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK";
                 let _ = stream.write_all(response.as_bytes()).await;
                 let _ = stream.shutdown().await;
@@ -70,7 +70,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     tokio::spawn(health_check_server(port));
 
     // Run the bot
-    bot::setup_bot(token, assets_path).await?;
+    setup_bot(token, assets_path).await?;
 
     Ok(())
 }

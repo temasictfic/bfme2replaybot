@@ -99,36 +99,39 @@ pub struct Player {
     pub actual_faction: Option<Faction>,   // For Random players, their actual faction
 }
 
-impl Player {
-    /// Create a player with full details
-    #[allow(clippy::too_many_arguments)]
-    pub fn with_details(
-        name: String,
-        uid: Option<String>,
-        team: i8,
-        team_raw: i8,
-        slot: u8,
-        faction: Faction,
-        color_id: i8,
-        color_rgb: [u8; 3],
-    ) -> Self {
-        Self {
-            name,
-            uid,
-            team,
-            team_raw,
-            slot,
-            faction,
-            color_id,
-            color_rgb,
+/// Builder for constructing a `Player` with named fields
+pub struct PlayerBuilder {
+    pub name: String,
+    pub uid: Option<String>,
+    pub team: i8,
+    pub team_raw: i8,
+    pub slot: u8,
+    pub faction: Faction,
+    pub color_id: i8,
+    pub color_rgb: [u8; 3],
+}
+
+impl PlayerBuilder {
+    pub fn build(self) -> Player {
+        Player {
+            name: self.name,
+            uid: self.uid,
+            team: self.team,
+            team_raw: self.team_raw,
+            slot: self.slot,
+            faction: self.faction,
+            color_id: self.color_id,
+            color_rgb: self.color_rgb,
             map_position: None,
             actual_faction: None,
         }
     }
+}
 
+impl Player {
     /// Get the display faction (actual if known, otherwise selected)
-    pub fn display_faction(&self) -> &Faction {
-        self.actual_faction.as_ref().unwrap_or(&self.faction)
+    pub fn display_faction(&self) -> Faction {
+        self.actual_faction.unwrap_or(self.faction)
     }
 
     /// Get the player's display color RGB
@@ -169,7 +172,7 @@ pub struct Spectator {
 }
 
 /// Replay parsing error types
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum ReplayError {
     InvalidHeader,
     UnsupportedMap(String),
@@ -293,7 +296,7 @@ impl ReplayInfo {
                 // Simple date formatting without external crate
                 // Using basic calculation (not accounting for leap seconds, etc.)
                 let days_since_epoch = secs / 86400;
-                let time_of_day = secs % 86400;
+                let time_of_day = (secs % 86400).max(0);
                 let hours = time_of_day / 3600;
                 let minutes = (time_of_day % 3600) / 60;
 
@@ -312,6 +315,9 @@ impl ReplayInfo {
 
 /// Convert days since Unix epoch to year/month/day
 fn days_to_ymd(days: i32) -> (i32, u32, u32) {
+    if days < 0 {
+        return (1970, 1, 1);
+    }
     // Days since 1970-01-01
     let mut remaining = days;
     let mut year = 1970;
@@ -403,5 +409,54 @@ mod tests {
             .with_times(1000, 1000)
             .with_estimated_duration(Some(3661));
         assert_eq!(info.duration_formatted(), "~1:01:01");
+    }
+
+    #[test]
+    fn test_days_to_ymd_epoch() {
+        assert_eq!(days_to_ymd(0), (1970, 1, 1));
+    }
+
+    #[test]
+    fn test_days_to_ymd_negative() {
+        // Negative days should return epoch
+        assert_eq!(days_to_ymd(-1), (1970, 1, 1));
+        assert_eq!(days_to_ymd(-365), (1970, 1, 1));
+    }
+
+    #[test]
+    fn test_days_to_ymd_known_dates() {
+        // 2000-01-01 = day 10957 from epoch
+        assert_eq!(days_to_ymd(10957), (2000, 1, 1));
+        // 2024-02-29 = leap day
+        // Days from 1970-01-01 to 2024-02-29
+        // 54 years: need precise calculation
+        // 1970-2024: 54 years, 13 leap years (72,76,80,84,88,92,96,00,04,08,12,16,20,24)
+        // Wait, 2024-02-29 is day 19782
+        // Let's use a simpler known date: 2024-01-01 = day 19723
+        assert_eq!(days_to_ymd(19723), (2024, 1, 1));
+    }
+
+    #[test]
+    fn test_days_to_ymd_leap_year() {
+        // 2000 is a leap year (divisible by 400)
+        assert!(is_leap_year(2000));
+        // 1900 is NOT a leap year (divisible by 100 but not 400)
+        assert!(!is_leap_year(1900));
+        // 2024 is a leap year
+        assert!(is_leap_year(2024));
+    }
+
+    #[test]
+    fn test_start_date_formatted_valid() {
+        // 2024-01-01 00:00 UTC = timestamp 1704067200
+        let info = make_replay().with_times(1704067200, 1704067200);
+        let formatted = info.start_date_formatted();
+        assert_eq!(formatted, "2024-01-01 00:00");
+    }
+
+    #[test]
+    fn test_start_date_formatted_none() {
+        let info = make_replay();
+        assert_eq!(info.start_date_formatted(), "Unknown");
     }
 }

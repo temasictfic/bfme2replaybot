@@ -1,6 +1,6 @@
 [package]
 name = "dcreplaybot"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 description = "Discord bot for parsing and visualizing BFME2 replay files"
 
@@ -8,15 +8,15 @@ description = "Discord bot for parsing and visualizing BFME2 replay files"
 # Discord bot framework
 poise = "0.6"
 serenity = { version = "0.12", default-features = false, features = ["client", "gateway", "model", "rustls_backend"] }
-tokio = { version = "1", features = ["rt", "macros", "fs", "net", "io-util"] }
+tokio = { version = "1", features = ["rt", "macros", "net", "io-util"] }
 
 # Archive extraction
 zip = "7.4.0"
 unrar = "0.5"
-tempfile = "3"
+tempfile = "3.25.0"
 
 # Image processing - slimmed down features
-image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
 imageproc = "0.26.0"
 ab_glyph = "0.2"
 
@@ -26,7 +26,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [profile.release]
-opt-level = "z"     # Optimize for size
+#opt-level = "z"     # Optimize for size
 lto = true          # Link-time optimization
 codegen-units = 1   # Better optimization
 panic = "abort"     # Smaller binary

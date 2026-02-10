@@ -1,22 +1,21 @@
 use crate::models::{Player, ReplayInfo, Winner};
-use ab_glyph::{Font, FontRef, PxScale, ScaleFont};
-use image::{Rgba, RgbaImage};
+use ab_glyph::{Font, FontArc, PxScale, ScaleFont};
+use image::{Rgb, RgbImage};
 use imageproc::drawing::draw_text_mut;
 use std::path::Path;
 
 /// Load and prepare a map image from the assets directory (call once at startup)
-pub fn load_map_image(map_name: &str, assets_path: &Path) -> Result<RgbaImage, String> {
-    let map_path = assets_path.join("maps").join(format!("{}.png", map_name));
-
+pub fn load_map_image(map_name: &str, assets_path: &Path) -> Result<RgbImage, String> {
     let map_path_jpg = assets_path.join("maps").join(format!("{}.jpg", map_name));
+    let map_path_png = assets_path.join("maps").join(format!("{}.png", map_name));
 
-    let img = if map_path.exists() {
-        image::open(&map_path)
-            .map(|img| img.to_rgba8())
-            .map_err(|e| format!("Failed to load map image: {}", e))?
-    } else if map_path_jpg.exists() {
+    let img = if map_path_jpg.exists() {
         image::open(&map_path_jpg)
-            .map(|img| img.to_rgba8())
+            .map(|img| img.to_rgb8())
+            .map_err(|e| format!("Failed to load map image: {}", e))?
+    } else if map_path_png.exists() {
+        image::open(&map_path_png)
+            .map(|img| img.to_rgb8())
             .map_err(|e| format!("Failed to load map image: {}", e))?
     } else {
         return Err(format!("Map image not found: {}", map_name));
@@ -39,70 +38,88 @@ pub fn load_map_image(map_name: &str, assets_path: &Path) -> Result<RgbaImage, S
     }
 }
 
+/// Parse font data into a FontArc (call once at startup, then share across renders)
+pub fn load_font(font_data: &[u8]) -> Result<FontArc, String> {
+    FontArc::try_from_vec(font_data.to_vec()).map_err(|e| format!("Failed to parse font: {}", e))
+}
+
 /// Circle center coordinates in pixels on the original 1624x1620 map asset.
 /// At render time these are scaled to match the actual (resized) image dimensions.
 const MAP_ASSET_WIDTH: f32 = 1624.0;
 const MAP_ASSET_HEIGHT: f32 = 1620.0;
 
-const POSITION_COORDS: [(f32, f32); 6] = [
-    (272.0, 336.0),   // TOP_LEFT
-    (198.0, 896.0),   // MID_LEFT
-    (344.0, 1370.0),  // BOTTOM_LEFT
-    (1330.0, 336.0),  // TOP_RIGHT
-    (1370.0, 850.0),  // MID_RIGHT
-    (1314.0, 1420.0), // BOTTOM_RIGHT
-];
+// Map position thresholds (game world coordinates)
+const MAP_X_MIDPOINT: f32 = 2500.0;
+const MAP_Y_TOP_THRESHOLD: f32 = 3000.0;
+const MAP_Y_MID_THRESHOLD: f32 = 1500.0;
 
-/// Get position name from game coordinates
-fn get_position_name(x: f32, y: f32) -> &'static str {
-    let side = if x < 2500.0 { "LEFT" } else { "RIGHT" };
-    let vert = if y > 3000.0 {
-        "TOP"
-    } else if y > 1500.0 {
-        "MID"
+/// Map positions for player placement
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Position {
+    TopLeft,
+    MidLeft,
+    BottomLeft,
+    TopRight,
+    MidRight,
+    BottomRight,
+}
+
+impl Position {
+    /// Get pixel coordinates on the original map asset for this position
+    fn coords(self) -> (f32, f32) {
+        match self {
+            Position::TopLeft => (272.0, 336.0),
+            Position::MidLeft => (198.0, 896.0),
+            Position::BottomLeft => (344.0, 1370.0),
+            Position::TopRight => (1330.0, 336.0),
+            Position::MidRight => (1370.0, 850.0),
+            Position::BottomRight => (1314.0, 1420.0),
+        }
+    }
+}
+
+/// Get position from game world coordinates
+fn get_position(x: f32, y: f32) -> Position {
+    let is_left = x < MAP_X_MIDPOINT;
+    if y > MAP_Y_TOP_THRESHOLD {
+        if is_left {
+            Position::TopLeft
+        } else {
+            Position::TopRight
+        }
+    } else if y > MAP_Y_MID_THRESHOLD {
+        if is_left {
+            Position::MidLeft
+        } else {
+            Position::MidRight
+        }
+    } else if is_left {
+        Position::BottomLeft
     } else {
-        "BOTTOM"
-    };
-
-    match (vert, side) {
-        ("TOP", "LEFT") => "TOP_LEFT",
-        ("MID", "LEFT") => "MID_LEFT",
-        ("BOTTOM", "LEFT") => "BOTTOM_LEFT",
-        ("TOP", "RIGHT") => "TOP_RIGHT",
-        ("MID", "RIGHT") => "MID_RIGHT",
-        ("BOTTOM", "RIGHT") => "BOTTOM_RIGHT",
-        _ => "TOP_LEFT",
+        Position::BottomRight
     }
 }
 
-/// Get image coordinates for a position name
-fn get_position_coords(pos_name: &str) -> Option<(f32, f32)> {
-    match pos_name {
-        "TOP_LEFT" => Some(POSITION_COORDS[0]),
-        "MID_LEFT" => Some(POSITION_COORDS[1]),
-        "BOTTOM_LEFT" => Some(POSITION_COORDS[2]),
-        "TOP_RIGHT" => Some(POSITION_COORDS[3]),
-        "MID_RIGHT" => Some(POSITION_COORDS[4]),
-        "BOTTOM_RIGHT" => Some(POSITION_COORDS[5]),
-        _ => None,
-    }
-}
+/// Draw a semi-transparent rectangle (alpha blending on RGB image)
+fn draw_rect_alpha(img: &mut RgbImage, x: i32, y: i32, w: i32, h: i32, color: [u8; 4]) {
+    let a = color[3] as f32 / 255.0;
+    let inv_a = 1.0 - a;
+    let src_r = color[0] as f32 * a;
+    let src_g = color[1] as f32 * a;
+    let src_b = color[2] as f32 * a;
 
-/// Draw a semi-transparent rectangle
-fn draw_rect_alpha(img: &mut RgbaImage, x: i32, y: i32, w: i32, h: i32, color: Rgba<u8>) {
     for py in y.max(0)..((y + h).min(img.height() as i32)) {
         for px in x.max(0)..((x + w).min(img.width() as i32)) {
             let pixel = img.get_pixel_mut(px as u32, py as u32);
-            let alpha = color[3] as f32 / 255.0;
-            pixel[0] = ((pixel[0] as f32 * (1.0 - alpha)) + (color[0] as f32 * alpha)) as u8;
-            pixel[1] = ((pixel[1] as f32 * (1.0 - alpha)) + (color[1] as f32 * alpha)) as u8;
-            pixel[2] = ((pixel[2] as f32 * (1.0 - alpha)) + (color[2] as f32 * alpha)) as u8;
+            pixel[0] = (pixel[0] as f32 * inv_a + src_r) as u8;
+            pixel[1] = (pixel[1] as f32 * inv_a + src_g) as u8;
+            pixel[2] = (pixel[2] as f32 * inv_a + src_b) as u8;
         }
     }
 }
 
 /// Measure text width using actual glyph advance widths from the font
-fn measure_text_width(text: &str, font: &FontRef, scale: PxScale) -> i32 {
+fn measure_text_width(text: &str, font: &FontArc, scale: PxScale) -> i32 {
     let scaled = font.as_scaled(scale);
     text.chars()
         .map(|c| scaled.h_advance(font.glyph_id(c)))
@@ -112,14 +129,11 @@ fn measure_text_width(text: &str, font: &FontRef, scale: PxScale) -> i32 {
 /// Render a map visualization with player positions
 pub fn render_map(
     replay: &ReplayInfo,
-    font_data: &[u8],
-    map_image: &RgbaImage,
+    font: &FontArc,
+    map_image: &RgbImage,
     filename: &str,
 ) -> Result<Vec<u8>, String> {
     let mut img = map_image.clone();
-
-    let font =
-        FontRef::try_from_slice(font_data).map_err(|e| format!("Failed to parse font: {}", e))?;
 
     // Font sizes
     let font_large = PxScale::from(24.0);
@@ -127,28 +141,25 @@ pub fn render_map(
 
     // Draw player info at each position (text only, no circles)
     for player in &replay.players {
-        draw_player_text(&mut img, player, &font, font_large, font_small);
+        draw_player_text(&mut img, player, font, font_large, font_small);
     }
 
     // Draw centered info (Filename, Date, Duration, Winner)
-    draw_center_info(&mut img, replay, &font, font_large, filename);
+    draw_center_info(&mut img, replay, font, font_large, filename);
 
     // Draw spectators if any
-    draw_spectators(&mut img, replay, &font, font_small);
+    draw_spectators(&mut img, replay, font, font_small);
 
-    // Encode to JPEG with quality 85
+    // Encode directly to JPEG with quality 85 (already RGB, no conversion needed)
     let mut buffer = Vec::new();
     let mut cursor = std::io::Cursor::new(&mut buffer);
-
-    // Convert to RGB for JPEG (no alpha channel)
-    let rgb_img: image::RgbImage = image::DynamicImage::ImageRgba8(img).into_rgb8();
 
     let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut cursor, 85);
     encoder
         .encode(
-            &rgb_img,
-            rgb_img.width(),
-            rgb_img.height(),
+            &img,
+            img.width(),
+            img.height(),
             image::ExtendedColorType::Rgb8,
         )
         .map_err(|e| format!("Failed to encode image: {}", e))?;
@@ -158,9 +169,9 @@ pub fn render_map(
 
 /// Draw player text at their position (center-aligned)
 fn draw_player_text(
-    img: &mut RgbaImage,
+    img: &mut RgbImage,
     player: &Player,
-    font: &FontRef,
+    font: &FontArc,
     font_large: PxScale,
     font_small: PxScale,
 ) {
@@ -171,8 +182,7 @@ fn draw_player_text(
     // Get position from map coordinates
     let img_pos = if let Some(pos) = &player.map_position {
         if pos.is_valid() {
-            let pos_name = get_position_name(pos.x, pos.y);
-            get_position_coords(pos_name)
+            Some(get_position(pos.x, pos.y).coords())
         } else {
             None
         }
@@ -191,7 +201,7 @@ fn draw_player_text(
 
     // Get player color
     let color = player.display_color();
-    let text_color = Rgba([color[0], color[1], color[2], 255]);
+    let text_color = Rgb([color[0], color[1], color[2]]);
 
     // Truncate name to 12 chars
     let name: String = player.name.chars().take(12).collect();
@@ -216,7 +226,7 @@ fn draw_player_text(
         name_y - 2,
         name_w + pad * 2,
         name_h + 4,
-        Rgba([0, 0, 0, 180]),
+        [0, 0, 0, 180],
     );
 
     draw_text_mut(img, text_color, name_x, name_y, font_large, font, &name);
@@ -233,7 +243,7 @@ fn draw_player_text(
         faction_y - 2,
         faction_w + pad * 2,
         faction_h + 4,
-        Rgba([0, 0, 0, 180]),
+        [0, 0, 0, 180],
     );
 
     draw_text_mut(
@@ -249,9 +259,9 @@ fn draw_player_text(
 
 /// Draw centered info (Filename, Date, Duration, Winner)
 fn draw_center_info(
-    img: &mut RgbaImage,
+    img: &mut RgbImage,
     replay: &ReplayInfo,
-    font: &FontRef,
+    font: &FontArc,
     scale: PxScale,
     filename: &str,
 ) {
@@ -271,27 +281,24 @@ fn draw_center_info(
     let duration_text = format!("Duration: {}", replay.duration_formatted());
 
     // Build info lines
-    let mut info_lines: Vec<(&str, Rgba<u8>)> = vec![
-        (&display_name, Rgba([255, 255, 255, 255])),
-        (&date_text, Rgba([255, 255, 255, 255])),
-        (&duration_text, Rgba([200, 200, 200, 255])),
+    let mut info_lines: Vec<(&str, Rgb<u8>)> = vec![
+        (&display_name, Rgb([255, 255, 255])),
+        (&date_text, Rgb([200, 200, 200])),
+        (&duration_text, Rgb([200, 200, 200])),
     ];
 
     // Only show winner if known
     let winner_text = if replay.game_crashed {
-        Some((
-            "Winner: Not Concluded".to_string(),
-            Rgba([200, 100, 100, 255]),
-        ))
+        Some(("Winner: Not Concluded".to_string(), Rgb([200, 100, 100])))
     } else if replay.winner == Winner::LikelyLeftTeam || replay.winner == Winner::LikelyRightTeam {
         Some((
             format!("Winner: {}", replay.winner.display_text()),
-            Rgba([255, 200, 80, 255]),
+            Rgb([255, 200, 80]),
         ))
     } else if replay.winner != Winner::Unknown {
         Some((
             format!("Winner: {}", replay.winner.display_text()),
-            Rgba([255, 215, 0, 255]),
+            Rgb([255, 215, 0]),
         ))
     } else {
         None
@@ -319,7 +326,7 @@ fn draw_center_info(
         start_y - padding,
         max_width + padding * 2,
         total_height + padding * 2,
-        Rgba([0, 0, 0, 160]),
+        [0, 0, 0, 160],
     );
 
     // Draw info text (centered)
@@ -332,30 +339,23 @@ fn draw_center_info(
 }
 
 /// Draw spectators above and below center
-fn draw_spectators(img: &mut RgbaImage, replay: &ReplayInfo, font: &FontRef, scale: PxScale) {
+fn draw_spectators(img: &mut RgbImage, replay: &ReplayInfo, font: &FontArc, scale: PxScale) {
     if replay.spectators.is_empty() {
         return;
     }
 
     let (width, height) = (img.width() as i32, img.height() as i32);
     let center_x = width / 2;
-    let spectator_color = Rgba([180, 180, 180, 255]);
+    let spectator_color = Rgb([180, 180, 180]);
 
     // First spectator near top
-    if !replay.spectators.is_empty() {
+    {
         let spec_y = (height as f32 * 0.08) as i32;
         let spec_text = format!("Obs: {}", replay.spectators[0].name);
         let spec_w = measure_text_width(&spec_text, font, scale);
         let spec_x = center_x - spec_w / 2;
 
-        draw_rect_alpha(
-            img,
-            spec_x - 3,
-            spec_y - 2,
-            spec_w + 6,
-            24,
-            Rgba([0, 0, 0, 160]),
-        );
+        draw_rect_alpha(img, spec_x - 3, spec_y - 2, spec_w + 6, 24, [0, 0, 0, 160]);
         draw_text_mut(
             img,
             spectator_color,
@@ -374,14 +374,7 @@ fn draw_spectators(img: &mut RgbaImage, replay: &ReplayInfo, font: &FontRef, sca
         let spec_w = measure_text_width(&spec_text, font, scale);
         let spec_x = center_x - spec_w / 2;
 
-        draw_rect_alpha(
-            img,
-            spec_x - 3,
-            spec_y - 2,
-            spec_w + 6,
-            24,
-            Rgba([0, 0, 0, 160]),
-        );
+        draw_rect_alpha(img, spec_x - 3, spec_y - 2, spec_w + 6, 24, [0, 0, 0, 160]);
         draw_text_mut(
             img,
             spectator_color,

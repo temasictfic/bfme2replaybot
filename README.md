@@ -7,7 +7,7 @@ Upload a `.BfME2Replay` file (or a `.zip`/`.rar` archive of replays), @mention t
 Currently supports the **Bfme2 1.00 / Rhun** (3v3) map:
 
 <p align="center">
-  <img src="assets/maps/map wor rhun.png" alt="Map Wor Rhun" width="400">
+  <img src="assets/maps/map wor rhun.jpg" alt="Map Wor Rhun" width="400">
 </p>
 
 

@@ -1,5 +1,6 @@
 use crate::models::{
-    Faction, MapPosition, PLAYER_COLORS, Player, ReplayError, ReplayInfo, Spectator, Winner,
+    Faction, MapPosition, PLAYER_COLORS, Player, PlayerBuilder, ReplayError, ReplayInfo, Spectator,
+    Winner,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -11,6 +12,18 @@ const CMD_BUILD_OBJECT_2: u32 = 1050;
 const CMD_UNIT_COMMAND: u32 = 1071; // Also has position data
 const CMD_END_GAME: u32 = 29;
 const CMD_PLAYER_DEFEATED: u32 = 1096;
+
+// Sanity limits for chunk parsing
+const MAX_SANE_TIMECODE: u32 = 10_000_000;
+const MAX_SANE_PLAYER_NUM: u32 = 100;
+const MAX_SANE_ARG_TYPES: usize = 100;
+const MAX_SANE_ARG_COUNT: usize = 50;
+
+// Map position threshold (game world coordinates)
+const MAP_X_MIDPOINT: f32 = 2500.0;
+
+// SAGE engine tick rate (~5 ticks per second)
+const SAGE_TICKS_PER_SECOND: u32 = 5;
 
 // Argument type sizes (from OpenSAGE)
 const ARG_SIZES: &[(u8, usize)] = &[
@@ -64,6 +77,55 @@ struct HeaderPlayer {
     slot: u8,
 }
 
+/// Result of a single-pass header parse
+struct HeaderParseResult {
+    map_name: String,
+    players: Vec<HeaderPlayer>,
+    spectators: Vec<String>,
+    occupied_slots: Vec<u8>,
+    chunks_start: Option<usize>,
+}
+
+/// Parse the header in a single pass: extract map name, players/spectators,
+/// and locate the chunks start offset.
+/// The binary preamble may contain null bytes before the text section,
+/// so we search the full buffer for M= and ;S= markers.
+fn parse_header(data: &[u8]) -> Result<HeaderParseResult, ReplayError> {
+    // Search full data for map name (text section position is variable)
+    let map_name = find_map_name_in(data).ok_or(ReplayError::ParseError(
+        "Could not find map name".to_string(),
+    ))?;
+
+    // Search full data for players/spectators
+    let (players, spectators, occupied_slots) = find_players_and_spectators_in(data);
+
+    // Find chunks start: first null byte after the ;S= section
+    let chunks_start = find_chunks_start(data);
+
+    Ok(HeaderParseResult {
+        map_name,
+        players,
+        spectators,
+        occupied_slots,
+        chunks_start,
+    })
+}
+
+/// Find where chunks start (first null byte after the ;S= section)
+fn find_chunks_start(data: &[u8]) -> Option<usize> {
+    let s_marker = b";S=";
+    for i in 0..data.len().saturating_sub(s_marker.len()) {
+        if &data[i..i + s_marker.len()] == s_marker {
+            for (j, &byte) in data.iter().enumerate().skip(i) {
+                if byte == 0 {
+                    return Some(j + 1);
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Parse a BFME2 replay file and extract game information
 pub fn parse_replay(data: &[u8]) -> Result<ReplayInfo, ReplayError> {
     // Verify magic bytes
@@ -71,22 +133,22 @@ pub fn parse_replay(data: &[u8]) -> Result<ReplayInfo, ReplayError> {
         return Err(ReplayError::InvalidHeader);
     }
 
-    // Check map name FIRST before any heavy parsing (early exit for unsupported maps)
-    let map_name = find_map_name(data).ok_or(ReplayError::ParseError(
-        "Could not find map name".to_string(),
-    ))?;
+    // Parse header in a single pass
+    let header_result = parse_header(data)?;
 
-    // Filter to only "wor rhun" maps
-    if !map_name.to_lowercase().contains("wor rhun") {
-        return Err(ReplayError::UnsupportedMap(map_name));
+    // Filter to only "wor rhun" maps (early exit for unsupported maps)
+    if !header_result.map_name.to_lowercase().contains("wor rhun") {
+        return Err(ReplayError::UnsupportedMap(header_result.map_name));
     }
 
     // Parse timestamps from header (offset 8-16)
     let start_time = u32::from_le_bytes([data[8], data[9], data[10], data[11]]);
     let end_time = u32::from_le_bytes([data[12], data[13], data[14], data[15]]);
 
-    // Find and parse players and spectators
-    let (mut header_players, spectators, occupied_slots) = find_players_and_spectators(data);
+    let map_name = header_result.map_name;
+    let mut header_players = header_result.players;
+    let spectators = header_result.spectators;
+    let occupied_slots = header_result.occupied_slots;
 
     if header_players.is_empty() {
         return Err(ReplayError::NoPlayers);
@@ -105,8 +167,7 @@ pub fn parse_replay(data: &[u8]) -> Result<ReplayInfo, ReplayError> {
     // Build initial players list
     let mut players = build_players(&header_players);
 
-    // Find header end (chunks start after null terminator)
-    let chunks_start = find_chunks_start(data);
+    let chunks_start = header_result.chunks_start;
 
     // Parse state for streaming chunk processing
     let mut winner = Winner::Unknown;
@@ -119,7 +180,7 @@ pub fn parse_replay(data: &[u8]) -> Result<ReplayInfo, ReplayError> {
 
         // Assign positions and actual factions to players
         for player in &mut players {
-            if let Some(build) = parse_result.player_builds.get(&player.slot) {
+            if let Some(build) = parse_result.positions.player_builds.get(&player.slot) {
                 player.map_position = Some(build.position);
                 if let Some(faction) = build.inferred_faction {
                     player.actual_faction = Some(faction);
@@ -133,15 +194,18 @@ pub fn parse_replay(data: &[u8]) -> Result<ReplayInfo, ReplayError> {
         // Determine winner
         winner = determine_winner(&parse_result, &header_players, &team_sides, &pn_to_slot);
 
-        // Check for crashed game
-        if !parse_result.has_endgame && parse_result.defeated_players.is_empty() {
+        // Check for crashed game (only if winner is still unknown)
+        if winner == Winner::Unknown
+            && !parse_result.combat.has_endgame
+            && parse_result.combat.defeated_players.is_empty()
+        {
             game_crashed = true;
             winner = Winner::NotConcluded;
         }
 
-        // Estimate duration from max chunk timecode (SAGE engine ~5 ticks/sec)
+        // Estimate duration from max chunk timecode
         if parse_result.max_timecode > 0 {
-            estimated_duration_secs = Some(parse_result.max_timecode / 5);
+            estimated_duration_secs = Some(parse_result.max_timecode / SAGE_TICKS_PER_SECOND);
         }
 
         // Remap teams to 1/2 based on side
@@ -161,21 +225,21 @@ pub fn parse_replay(data: &[u8]) -> Result<ReplayInfo, ReplayError> {
         .with_estimated_duration(estimated_duration_secs))
 }
 
-/// Search for "M=" marker and extract map name
-fn find_map_name(data: &[u8]) -> Option<String> {
+/// Search for "M=" marker and extract map name within a header slice
+fn find_map_name_in(header: &[u8]) -> Option<String> {
     let marker = b"M=";
 
-    for i in 0..data.len().saturating_sub(marker.len()) {
-        if &data[i..i + marker.len()] == marker {
+    for i in 0..header.len().saturating_sub(marker.len()) {
+        if &header[i..i + marker.len()] == marker {
             let start = i + marker.len();
             let mut end = start;
 
-            while end < data.len() && data[end] != b';' {
+            while end < header.len() && header[end] != b';' {
                 end += 1;
             }
 
             if end > start {
-                let map_path = &data[start..end];
+                let map_path = &header[start..end];
                 if let Ok(path_str) = std::str::from_utf8(map_path) {
                     return extract_map_name_from_path(path_str);
                 }
@@ -237,29 +301,29 @@ fn decode_with_turkish_fallback(bytes: &[u8]) -> String {
     result
 }
 
-/// Find the S= section and parse all players and spectators.
+/// Find the S= section within a header slice and parse all players and spectators.
 /// Returns (players, spectator_names, occupied_slots) where occupied_slots
 /// contains the slot index of every non-empty entry (players AND spectators).
-fn find_players_and_spectators(data: &[u8]) -> (Vec<HeaderPlayer>, Vec<String>, Vec<u8>) {
+fn find_players_and_spectators_in(header: &[u8]) -> (Vec<HeaderPlayer>, Vec<String>, Vec<u8>) {
     let mut players = Vec::new();
     let mut spectators = Vec::new();
     let mut occupied_slots = Vec::new();
     let marker = b";S=";
 
-    for i in 0..data.len().saturating_sub(marker.len()) {
-        if &data[i..i + marker.len()] == marker {
+    for i in 0..header.len().saturating_sub(marker.len()) {
+        if &header[i..i + marker.len()] == marker {
             let start = i + marker.len();
             let mut end = start;
 
-            while end < data.len() {
-                let b = data[end];
+            while end < header.len() {
+                let b = header[end];
                 if b == 0 || b == b'\n' || b == b'\r' {
                     break;
                 }
-                if end + 2 < data.len()
-                    && data[end] == b';'
-                    && data[end + 1].is_ascii_uppercase()
-                    && data[end + 2] == b'='
+                if end + 2 < header.len()
+                    && header[end] == b';'
+                    && header[end + 1].is_ascii_uppercase()
+                    && header[end + 2] == b'='
                 {
                     break;
                 }
@@ -267,7 +331,7 @@ fn find_players_and_spectators(data: &[u8]) -> (Vec<HeaderPlayer>, Vec<String>, 
             }
 
             if end > start {
-                let players_str = decode_with_turkish_fallback(&data[start..end]);
+                let players_str = decode_with_turkish_fallback(&header[start..end]);
 
                 for (slot_idx, player_str) in players_str.split(':').enumerate() {
                     if let Some(parsed) = parse_player_data(player_str, slot_idx as u8) {
@@ -305,7 +369,9 @@ fn parse_player_data(s: &str, slot: u8) -> Option<HeaderPlayer> {
 
     let mut name = parts[0].to_string();
     if name.starts_with('H') && name.len() > 1 {
-        name = name[1..].to_string();
+        let mut chars = name.chars();
+        chars.next(); // skip 'H'
+        name = chars.as_str().to_string();
     }
 
     if name.is_empty() {
@@ -437,33 +503,19 @@ fn build_players(header_players: &[HeaderPlayer]) -> Vec<Player> {
                 [128, 128, 128]
             };
 
-            Player::with_details(
-                hp.name.clone(),
-                hp.uid.clone(),
+            PlayerBuilder {
+                name: hp.name.clone(),
+                uid: hp.uid.clone(),
                 team,
-                hp.team_raw,
-                hp.slot,
-                Faction::from_id(hp.faction_id),
-                hp.color_id,
+                team_raw: hp.team_raw,
+                slot: hp.slot,
+                faction: Faction::from_id(hp.faction_id),
+                color_id: hp.color_id,
                 color_rgb,
-            )
+            }
+            .build()
         })
         .collect()
-}
-
-/// Find where chunks start (after header null terminator)
-fn find_chunks_start(data: &[u8]) -> Option<usize> {
-    let s_marker = b";S=";
-    for i in 0..data.len().saturating_sub(s_marker.len()) {
-        if &data[i..i + s_marker.len()] == s_marker {
-            for (j, &byte) in data.iter().enumerate().skip(i) {
-                if byte == 0 {
-                    return Some(j + 1);
-                }
-            }
-        }
-    }
-    None
 }
 
 /// Build info extracted from commands
@@ -473,15 +525,25 @@ struct BuildInfo {
     inferred_faction: Option<Faction>,
 }
 
-/// Result of chunk parsing and analysis
-struct ChunkParseResult {
+/// Position and faction data collected per player
+struct PositionData {
     player_builds: HashMap<u8, BuildInfo>,
     player_positions: HashMap<u8, MapPosition>,
     player_building_ids: HashMap<u8, HashSet<u32>>,
+}
+
+/// Combat/game result data from chunk parsing
+struct CombatResult {
     defeated_players: HashSet<u32>,
     endgame_player: Option<u32>,
     endgame_timecode: u32,
     has_endgame: bool,
+}
+
+/// Result of chunk parsing and analysis
+struct ChunkParseResult {
+    positions: PositionData,
+    combat: CombatResult,
     max_timecode: u32,
 }
 
@@ -493,13 +555,17 @@ fn parse_and_analyze_chunks(
     pn_to_slot: &HashMap<u32, u8>,
 ) -> ChunkParseResult {
     let mut result = ChunkParseResult {
-        player_builds: HashMap::new(),
-        player_positions: HashMap::new(),
-        player_building_ids: HashMap::new(),
-        defeated_players: HashSet::new(),
-        endgame_player: None,
-        endgame_timecode: 0,
-        has_endgame: false,
+        positions: PositionData {
+            player_builds: HashMap::new(),
+            player_positions: HashMap::new(),
+            player_building_ids: HashMap::new(),
+        },
+        combat: CombatResult {
+            defeated_players: HashSet::new(),
+            endgame_player: None,
+            endgame_timecode: 0,
+            has_endgame: false,
+        },
         max_timecode: 0,
     };
 
@@ -546,6 +612,7 @@ fn parse_and_analyze_chunks(
                     && let Some(bid) = extract_building_id(&chunk)
                 {
                     result
+                        .positions
                         .player_building_ids
                         .entry(slot)
                         .or_default()
@@ -556,16 +623,16 @@ fn parse_and_analyze_chunks(
             // Process EndGame command (only from actual players, not spectators)
             // Keep the one with the highest timecode (latest)
             if chunk.order_type == CMD_END_GAME && is_valid_player {
-                if !result.has_endgame || chunk.time_code >= result.endgame_timecode {
-                    result.endgame_player = Some(chunk.player_num);
-                    result.endgame_timecode = chunk.time_code;
+                if !result.combat.has_endgame || chunk.time_code >= result.combat.endgame_timecode {
+                    result.combat.endgame_player = Some(chunk.player_num);
+                    result.combat.endgame_timecode = chunk.time_code;
                 }
-                result.has_endgame = true;
+                result.combat.has_endgame = true;
             }
 
             // Process Player Defeated command (only actual players, not spectators)
             if chunk.order_type == CMD_PLAYER_DEFEATED && is_valid_player {
-                result.defeated_players.insert(chunk.player_num);
+                result.combat.defeated_players.insert(chunk.player_num);
             }
 
             pos = next_pos;
@@ -576,10 +643,14 @@ fn parse_and_analyze_chunks(
 
     // Merge positions: prefer build positions, fall back to unit positions
     for (slot, pos_data) in &build_positions {
-        result.player_positions.insert(*slot, *pos_data);
+        result.positions.player_positions.insert(*slot, *pos_data);
     }
     for (slot, pos_data) in &unit_positions {
-        result.player_positions.entry(*slot).or_insert(*pos_data);
+        result
+            .positions
+            .player_positions
+            .entry(*slot)
+            .or_insert(*pos_data);
     }
 
     // Raw binary scan fallback: scan for Order 1096/29 patterns that the chunk
@@ -594,11 +665,11 @@ fn parse_and_analyze_chunks(
     raw_scan_for_critical_events(data, start, &valid_player_nums, &mut result);
 
     // Build player_builds from positions and building IDs
-    for (slot, position) in &result.player_positions {
-        let buildings = result.player_building_ids.get(slot);
+    for (slot, position) in &result.positions.player_positions.clone() {
+        let buildings = result.positions.player_building_ids.get(slot);
         let inferred_faction = buildings.and_then(detect_faction_from_buildings);
 
-        result.player_builds.insert(
+        result.positions.player_builds.insert(
             *slot,
             BuildInfo {
                 position: *position,
@@ -690,7 +761,10 @@ fn parse_chunk(data: &[u8], offset: usize) -> Option<(usize, Chunk)> {
     let n_arg_types = data[offset + 12] as usize;
 
     // Sanity checks
-    if time_code > 10_000_000 || player_num > 100 || n_arg_types > 100 {
+    if time_code > MAX_SANE_TIMECODE
+        || player_num > MAX_SANE_PLAYER_NUM
+        || n_arg_types > MAX_SANE_ARG_TYPES
+    {
         return None;
     }
 
@@ -704,7 +778,7 @@ fn parse_chunk(data: &[u8], offset: usize) -> Option<(usize, Chunk)> {
         }
         let arg_type = data[pos];
         let arg_count = data[pos + 1] as usize;
-        if arg_count > 50 {
+        if arg_count > MAX_SANE_ARG_COUNT {
             return None;
         }
         arg_sig.push((arg_type, arg_count));
@@ -817,7 +891,7 @@ fn raw_scan_for_critical_events(
                     ]);
                     let n_args = data[chunk_offset + 12] as u32;
 
-                    let tc_valid = tc > 0 && tc < 10_000_000;
+                    let tc_valid = tc > 0 && tc < MAX_SANE_TIMECODE;
                     let pn_valid = (3..=20).contains(&player_num);
                     let nargs_valid = n_args <= 10;
 
@@ -827,14 +901,14 @@ fn raw_scan_for_critical_events(
                         && valid_player_nums.contains(&player_num)
                     {
                         if cmd == CMD_PLAYER_DEFEATED {
-                            result.defeated_players.insert(player_num);
+                            result.combat.defeated_players.insert(player_num);
                         } else if cmd == CMD_END_GAME {
                             // Keep the latest EndGame by timecode
-                            if !result.has_endgame || tc >= result.endgame_timecode {
-                                result.endgame_player = Some(player_num);
-                                result.endgame_timecode = tc;
+                            if !result.combat.has_endgame || tc >= result.combat.endgame_timecode {
+                                result.combat.endgame_player = Some(player_num);
+                                result.combat.endgame_timecode = tc;
                             }
-                            result.has_endgame = true;
+                            result.combat.has_endgame = true;
                         }
                     }
                 }
@@ -854,7 +928,11 @@ fn determine_team_sides(players: &[Player]) -> HashMap<i8, &'static str> {
             && pos.is_valid()
             && !team_sides.contains_key(&player.team_raw)
         {
-            let side = if pos.x < 2500.0 { "Left" } else { "Right" };
+            let side = if pos.x < MAP_X_MIDPOINT {
+                "Left"
+            } else {
+                "Right"
+            };
             team_sides.insert(player.team_raw, side);
         }
     }
@@ -871,34 +949,99 @@ fn remap_teams_by_side(players: &mut [Player], team_sides: &HashMap<i8, &'static
     }
 }
 
-/// Determine winner based on game events
+/// Convert a side string to a certain Winner variant
+fn side_to_winner(side: &str) -> Winner {
+    if side == "Left" {
+        Winner::LeftTeam
+    } else {
+        Winner::RightTeam
+    }
+}
+
+/// Convert a side string to a likely Winner variant
+fn side_to_likely_winner(side: &str) -> Winner {
+    if side == "Left" {
+        Winner::LikelyLeftTeam
+    } else {
+        Winner::LikelyRightTeam
+    }
+}
+
+/// Try to determine winner from EndGame command (Order 29)
+fn winner_from_endgame(
+    combat: &CombatResult,
+    header_players: &[HeaderPlayer],
+    team_sides: &HashMap<i8, &'static str>,
+    pn_to_slot: &HashMap<u32, u8>,
+) -> Option<Winner> {
+    let endgame_pn = combat.endgame_player?;
+    let &endgame_slot = pn_to_slot.get(&endgame_pn)?;
+    let hp = header_players.iter().find(|hp| hp.slot == endgame_slot)?;
+    let &side = team_sides.get(&hp.team_raw)?;
+    Some(side_to_winner(side))
+}
+
+/// Try to determine winner from all players on one team being defeated
+fn winner_from_full_defeat(
+    defeated: &HashSet<u32>,
+    team_players: &HashMap<i8, Vec<u32>>,
+    team_sides: &HashMap<i8, &'static str>,
+) -> Option<Winner> {
+    for (team_raw, players_pn) in team_players {
+        if players_pn.iter().all(|pn| defeated.contains(pn)) {
+            // This team lost, the other team won
+            for other_team_raw in team_players.keys() {
+                if other_team_raw != team_raw
+                    && let Some(&side) = team_sides.get(other_team_raw)
+                {
+                    return Some(side_to_winner(side));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Try to determine winner from majority-defeated heuristic
+fn winner_from_majority_defeated(
+    defeated: &HashSet<u32>,
+    team_players: &HashMap<i8, Vec<u32>>,
+    team_sides: &HashMap<i8, &'static str>,
+) -> Option<Winner> {
+    if team_players.len() != 2 {
+        return None;
+    }
+    let teams: Vec<i8> = team_players.keys().cloned().collect();
+    let team_a = teams[0];
+    let team_b = teams[1];
+
+    let defeats_a = team_players[&team_a]
+        .iter()
+        .filter(|pn| defeated.contains(pn))
+        .count();
+    let defeats_b = team_players[&team_b]
+        .iter()
+        .filter(|pn| defeated.contains(pn))
+        .count();
+
+    if defeats_a > defeats_b {
+        team_sides.get(&team_b).map(|s| side_to_likely_winner(s))
+    } else if defeats_b > defeats_a {
+        team_sides.get(&team_a).map(|s| side_to_likely_winner(s))
+    } else {
+        None
+    }
+}
+
+/// Determine winner based on game events, using chained strategies
 fn determine_winner(
     parse_result: &ChunkParseResult,
     header_players: &[HeaderPlayer],
     team_sides: &HashMap<i8, &'static str>,
     pn_to_slot: &HashMap<u32, u8>,
 ) -> Winner {
-    // Primary: Order 29 = EndGame command indicates winner's team
-    if let Some(endgame_pn) = parse_result.endgame_player {
-        let endgame_slot = match pn_to_slot.get(&endgame_pn) {
-            Some(&s) => s,
-            None => return Winner::Unknown,
-        };
-        if let Some(hp) = header_players.iter().find(|hp| hp.slot == endgame_slot)
-            && let Some(&side) = team_sides.get(&hp.team_raw)
-        {
-            return if side == "Left" {
-                Winner::LeftTeam
-            } else {
-                Winner::RightTeam
-            };
-        }
-    }
-
-    // Build reverse mapping: slot_to_pn
+    // Build reverse mapping and team grouping (shared by fallback strategies)
     let slot_to_pn: HashMap<u8, u32> = pn_to_slot.iter().map(|(&pn, &slot)| (slot, pn)).collect();
-
-    // Group players by team (used by both fallback methods)
     let mut team_players: HashMap<i8, Vec<u32>> = HashMap::new();
     for hp in header_players {
         if let Some(&pn) = slot_to_pn.get(&hp.slot) {
@@ -906,68 +1049,28 @@ fn determine_winner(
         }
     }
 
-    if !parse_result.defeated_players.is_empty() {
-        // Fallback 1: Check if all players from one team are defeated
-        for (team_raw, players_pn) in &team_players {
-            let all_defeated = players_pn
-                .iter()
-                .all(|pn| parse_result.defeated_players.contains(pn));
-            if all_defeated {
-                // This team lost, the other team won
-                for other_team_raw in team_players.keys() {
-                    if other_team_raw != team_raw
-                        && let Some(&side) = team_sides.get(other_team_raw)
-                    {
-                        return if side == "Left" {
-                            Winner::LeftTeam
-                        } else {
-                            Winner::RightTeam
-                        };
-                    }
-                }
+    winner_from_endgame(&parse_result.combat, header_players, team_sides, pn_to_slot)
+        .or_else(|| {
+            if parse_result.combat.defeated_players.is_empty() {
+                return None;
             }
-        }
-
-        // Fallback 2: Majority-defeated heuristic
-        // The team with MORE defeated players is the likely loser.
-        // Not certain - one player CAN take out multiple enemies.
-        if team_players.len() == 2 {
-            let teams: Vec<i8> = team_players.keys().cloned().collect();
-            let team_a = teams[0];
-            let team_b = teams[1];
-
-            let defeats_a = team_players[&team_a]
-                .iter()
-                .filter(|pn| parse_result.defeated_players.contains(pn))
-                .count();
-            let defeats_b = team_players[&team_b]
-                .iter()
-                .filter(|pn| parse_result.defeated_players.contains(pn))
-                .count();
-
-            if defeats_a > defeats_b {
-                // Team A has more defeats -> Team B likely won
-                if let Some(&side) = team_sides.get(&team_b) {
-                    return if side == "Left" {
-                        Winner::LikelyLeftTeam
-                    } else {
-                        Winner::LikelyRightTeam
-                    };
-                }
-            } else if defeats_b > defeats_a {
-                // Team B has more defeats -> Team A likely won
-                if let Some(&side) = team_sides.get(&team_a) {
-                    return if side == "Left" {
-                        Winner::LikelyLeftTeam
-                    } else {
-                        Winner::LikelyRightTeam
-                    };
-                }
+            winner_from_full_defeat(
+                &parse_result.combat.defeated_players,
+                &team_players,
+                team_sides,
+            )
+        })
+        .or_else(|| {
+            if parse_result.combat.defeated_players.is_empty() {
+                return None;
             }
-        }
-    }
-
-    Winner::Unknown
+            winner_from_majority_defeated(
+                &parse_result.combat.defeated_players,
+                &team_players,
+                team_sides,
+            )
+        })
+        .unwrap_or(Winner::Unknown)
 }
 
 #[cfg(test)]
@@ -1030,5 +1133,78 @@ mod tests {
         let turkish_bytes = b"Test\xDD\xFD"; // I with dot, dotless i in Windows-1254
         let decoded = decode_with_turkish_fallback(turkish_bytes);
         assert!(decoded.contains("Test"));
+    }
+
+    /// Build a minimal valid replay byte sequence for testing
+    fn build_test_replay(map_name: &str, players_str: &str) -> Vec<u8> {
+        let mut data = Vec::new();
+        // Magic
+        data.extend_from_slice(b"BFME2RPL");
+        // Start time (4 bytes) + End time (4 bytes)
+        data.extend_from_slice(&1700000000u32.to_le_bytes());
+        data.extend_from_slice(&1700001000u32.to_le_bytes());
+        // Header content
+        let header = format!("M=maps/{};S={}", map_name, players_str);
+        data.extend_from_slice(header.as_bytes());
+        // Null terminator (marks end of header / start of chunks)
+        data.push(0);
+        data
+    }
+
+    #[test]
+    fn test_parse_replay_valid_rhun() {
+        let data = build_test_replay(
+            "map wor rhun",
+            "HAlice,12345678,8094,TT,0,-1,0,0,0,1,0:HBob,87654321,8094,TT,1,-1,1,1,0,1,0",
+        );
+        let result = parse_replay(&data);
+        assert!(result.is_ok());
+        let info = result.unwrap();
+        assert_eq!(info.players.len(), 2);
+        assert_eq!(info.players[0].name, "Alice");
+        assert_eq!(info.players[1].name, "Bob");
+    }
+
+    #[test]
+    fn test_parse_replay_unsupported_map() {
+        let data = build_test_replay(
+            "fords of isen",
+            "HAlice,12345678,8094,TT,0,-1,0,0,0,1,0:HBob,87654321,8094,TT,1,-1,1,1,0,1,0",
+        );
+        let result = parse_replay(&data);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            ReplayError::UnsupportedMap(name) => assert_eq!(name, "fords of isen"),
+            other => panic!("Expected UnsupportedMap, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_replay_corrupt_data() {
+        // Too short to even have magic bytes
+        let result = parse_replay(&[0u8; 4]);
+        assert!(matches!(result, Err(ReplayError::InvalidHeader)));
+    }
+
+    #[test]
+    fn test_parse_replay_bad_magic() {
+        let mut data = vec![0u8; 24];
+        data[..8].copy_from_slice(b"NOTMAGIC");
+        let result = parse_replay(&data);
+        assert!(matches!(result, Err(ReplayError::InvalidHeader)));
+    }
+
+    #[test]
+    fn test_parse_replay_no_players() {
+        let data = build_test_replay("map wor rhun", "X:X:X:X");
+        let result = parse_replay(&data);
+        assert!(matches!(result, Err(ReplayError::NoPlayers)));
+    }
+
+    #[test]
+    fn test_char_safe_name_slicing() {
+        // Test that H-prefix stripping works with multi-byte characters
+        let player = parse_player_data("HTest,12345678,8094,TT,0,-1,0,0,0,1,0", 0).unwrap();
+        assert_eq!(player.name, "Test");
     }
 }
