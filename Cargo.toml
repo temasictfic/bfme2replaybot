@@ -1,6 +1,6 @@
 [package]
 name = "dcreplaybot"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2024"
 description = "Discord bot for parsing and visualizing BFME2 replay files"
 
@@ -24,6 +24,10 @@ ab_glyph = "0.2"
 dotenvy = "0.15"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Memory allocator (Linux only — jemalloc doesn't support Windows)
+[target.'cfg(target_os = "linux")'.dependencies]
+tikv-jemallocator = "0.6"
 
 [profile.release]
 #opt-level = "z"     # Optimize for size
