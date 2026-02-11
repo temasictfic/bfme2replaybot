@@ -968,6 +968,9 @@ fn side_to_likely_winner(side: &str) -> Winner {
 }
 
 /// Try to determine winner from EndGame command (Order 29)
+///
+/// If the EndGame player is also in the defeated set, they lost — the other team wins.
+/// Otherwise the EndGame player's team is considered the winner.
 fn winner_from_endgame(
     combat: &CombatResult,
     header_players: &[HeaderPlayer],
@@ -977,8 +980,23 @@ fn winner_from_endgame(
     let endgame_pn = combat.endgame_player?;
     let &endgame_slot = pn_to_slot.get(&endgame_pn)?;
     let hp = header_players.iter().find(|hp| hp.slot == endgame_slot)?;
-    let &side = team_sides.get(&hp.team_raw)?;
-    Some(side_to_winner(side))
+    let &endgame_side = team_sides.get(&hp.team_raw)?;
+
+    if combat.defeated_players.contains(&endgame_pn) {
+        // EndGame player was defeated — their team lost, the other team won
+        let other_side = if endgame_side == "Left" {
+            "Right"
+        } else {
+            "Left"
+        };
+        // Verify the other side actually exists in team_sides
+        if team_sides.values().any(|&s| s == other_side) {
+            return Some(side_to_winner(other_side));
+        }
+        return None;
+    }
+
+    Some(side_to_winner(endgame_side))
 }
 
 /// Try to determine winner from all players on one team being defeated
@@ -1206,5 +1224,94 @@ mod tests {
         // Test that H-prefix stripping works with multi-byte characters
         let player = parse_player_data("HTest,12345678,8094,TT,0,-1,0,0,0,1,0", 0).unwrap();
         assert_eq!(player.name, "Test");
+    }
+
+    #[test]
+    fn test_endgame_defeated_player_means_other_team_wins() {
+        // When the EndGame player is also in defeated_players,
+        // their team lost — the other team should win.
+        let mut defeated = HashSet::new();
+        defeated.insert(4u32); // pn=4 is defeated
+
+        let combat = CombatResult {
+            defeated_players: defeated,
+            endgame_player: Some(4), // same player triggered EndGame
+            endgame_timecode: 7000,
+            has_endgame: true,
+        };
+
+        // pn=4 → slot=1 (Left team, team_raw=0)
+        let header_players = vec![
+            HeaderPlayer {
+                name: "LeftPlayer".to_string(),
+                uid: None,
+                slot: 1,
+                color_id: 0,
+                faction_id: 0,
+                team_raw: 0,
+            },
+            HeaderPlayer {
+                name: "RightPlayer".to_string(),
+                uid: None,
+                slot: 2,
+                color_id: 1,
+                faction_id: 1,
+                team_raw: 1,
+            },
+        ];
+
+        let mut team_sides = HashMap::new();
+        team_sides.insert(0i8, "Left");
+        team_sides.insert(1i8, "Right");
+
+        let mut pn_to_slot = HashMap::new();
+        pn_to_slot.insert(4u32, 1u8);
+        pn_to_slot.insert(5u32, 2u8);
+
+        let result = winner_from_endgame(&combat, &header_players, &team_sides, &pn_to_slot);
+        // Left player was defeated + triggered EndGame → Right team wins
+        assert_eq!(result, Some(Winner::RightTeam));
+    }
+
+    #[test]
+    fn test_endgame_non_defeated_player_means_their_team_wins() {
+        // When the EndGame player is NOT defeated, their team wins (normal case).
+        let combat = CombatResult {
+            defeated_players: HashSet::new(),
+            endgame_player: Some(5), // Right player triggered EndGame, not defeated
+            endgame_timecode: 7000,
+            has_endgame: true,
+        };
+
+        let header_players = vec![
+            HeaderPlayer {
+                name: "LeftPlayer".to_string(),
+                uid: None,
+                slot: 1,
+                color_id: 0,
+                faction_id: 0,
+                team_raw: 0,
+            },
+            HeaderPlayer {
+                name: "RightPlayer".to_string(),
+                uid: None,
+                slot: 2,
+                color_id: 1,
+                faction_id: 1,
+                team_raw: 1,
+            },
+        ];
+
+        let mut team_sides = HashMap::new();
+        team_sides.insert(0i8, "Left");
+        team_sides.insert(1i8, "Right");
+
+        let mut pn_to_slot = HashMap::new();
+        pn_to_slot.insert(4u32, 1u8);
+        pn_to_slot.insert(5u32, 2u8);
+
+        let result = winner_from_endgame(&combat, &header_players, &team_sides, &pn_to_slot);
+        // Right player triggered EndGame and was NOT defeated → Right team wins
+        assert_eq!(result, Some(Winner::RightTeam));
     }
 }
