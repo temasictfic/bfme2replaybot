@@ -25,9 +25,9 @@ dotenvy = "0.15"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-# Memory allocator (Linux only — jemalloc doesn't support Windows)
+# glibc malloc_trim (Linux only)
 [target.'cfg(target_os = "linux")'.dependencies]
-tikv-jemallocator = "0.6"
+libc = "0.2"
 
 [profile.release]
 #opt-level = "z"     # Optimize for size

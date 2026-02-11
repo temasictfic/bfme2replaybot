@@ -15,6 +15,17 @@ use super::setup::{Data, PendingReplays, cleanup_expired_pending_inner};
 const MAX_SINGLE_REPLAY_BYTES: u64 = 5 * 1024 * 1024; // 5MB
 const MAX_ARCHIVE_BYTES: u64 = 25 * 1024 * 1024; // 25MB
 
+/// Tell glibc to return free memory to the OS.
+/// No-op on non-Linux platforms.
+#[cfg(target_os = "linux")]
+pub fn trim_memory() {
+    // SAFETY: malloc_trim is safe to call at any time.
+    unsafe { libc::malloc_trim(0); }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn trim_memory() {}
+
 type Error = Box<dyn std::error::Error + Send + Sync>;
 
 /// Handle incoming messages with replay attachments
@@ -78,6 +89,7 @@ pub async fn handle_message(
         }
     }
 
+    trim_memory();
     Ok(())
 }
 
