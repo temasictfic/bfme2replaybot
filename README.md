@@ -26,7 +26,8 @@ Currently supports the **Bfme2 1.00 / Rhun** (3v3) map:
 
 1. Invite the bot to your Discord server
 2. Upload a `.BfME2Replay` file (or archive) to any channel the bot can see
-3. @mention the bot in the same message, or reply to a message containing a replay with an @mention
+3. @mention the bot in the same message, or reply to a message containing a replay with an @mention, also you can forward from
+another server
 4. The bot responds with a rendered map image
 
 ## Setup
@@ -73,27 +74,6 @@ The CI pipeline builds a Docker image and pushes it to GHCR on every push to `ma
 
 The bot exposes a health check on the `PORT` environment variable (default `8000`).
 
-## Project Structure
-
-```
-src/
-  main.rs              # Entry point, health check server
-  bot/commands.rs      # Discord event handling, file extraction
-  parser/replay.rs     # Binary replay parser (header + chunks)
-  renderer/map.rs      # Map image renderer
-  models/replay.rs     # Data models (Player, Faction, Winner, etc.)
-assets/
-  fonts/               # Bundled font (NotoSans-Bold)
-  maps/                # Map background images
-```
-
-## CI
-
-GitHub Actions runs on every push and PR:
-
-- `cargo check` / `cargo test` / `cargo clippy -- -D warnings` / `cargo fmt --check`
-- Docker build + push to GHCR (on `main` only, after all checks pass)
-- Koyeb service redeploy (on `main` only, after Docker push)
 
 ## Technical Details
 

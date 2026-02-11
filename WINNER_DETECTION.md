@@ -9,7 +9,7 @@ BFME2 replay files (.BfME2Replay) contain a binary header followed by a stream o
 
 ## Detection Algorithm
 
-Winner detection uses three methods in priority order:
+Winner detection uses four methods in priority order:
 
 ### Method 1: EndGame Command (Order 29) — Certain
 
@@ -43,9 +43,34 @@ if no endgame AND defeats exist AND no team fully eliminated:
         confidence = likely (not certain)
 ```
 
+### Method 4: Last-Build-Activity Heuristic — Likely
+
+When no EndGame or defeat events yield a winner (common in observer replays where engine events land on spectator player_nums and get filtered out), the last build command timecodes are compared between teams. The team that stopped constructing buildings earlier probably lost.
+
+Only build commands (Order 1049 `CMD_BUILD_OBJECT` and Order 1050 `CMD_BUILD_OBJECT_2`) are tracked — not all commands. This distinction is critical: losing teams continue issuing sell/demolish and unit commands right up to the end of the game, but they stop **constructing new buildings** earlier than the winning team.
+
+```
+for each player:
+    track last timecode of Order 1049/1050 commands
+
+for each team:
+    team_last_build = max(last_build_tc of all players on team)
+
+gap = abs(team_A_last_build - team_B_last_build)
+if gap > max_timecode / 20:  # >5% of game duration
+    likely_winner = team with later last_build
+    confidence = likely (not certain)
+```
+
+The 5% threshold prevents false positives from minor timing differences. In the `eren` observer replay, the gap was 6.2% (winning team's last build at 98.3% vs losing team at 92.1% of game duration).
+
+#### Why not sell/demolish commands?
+
+Order 1128 (sell building) was investigated as an alternative heuristic but **rejected** — across 20 testable replays, the team that sold more buildings was actually the *winner* 55% of the time. Winning teams actively restructure their economy (selling and rebuilding as they expand), making sell count an unreliable loser signal.
+
 ### Crash Detection
 
-If neither Order 29 nor any Order 1096 events are found (even after raw scan), the game is assumed to have crashed or been abandoned. Reported as "Not Concluded".
+If no method produces a winner and neither Order 29 nor any Order 1096 events are found (even after raw scan), the game is assumed to have crashed or been abandoned. Reported as "Not Concluded".
 
 ## Spectator Handling
 
@@ -163,6 +188,12 @@ This needs further investigation across more replays with random-color players t
 - **Issue**: Same position-priority bug as Replay 08. BOSS rendered at enemy side.
 - **Fix**: Same build-position priority fix.
 
+### eren (ereninyıkılışıgöremedim aq)
+- **Known events**: Observer replay with 2 spectators (Mtrix\_, VHaGaR\`) interleaved between players in the slot list
+- **Issue**: EndGame (Order 29) and PlayerDefeated (Order 1096) events land on spectator player\_nums (pn=5, pn=8), which get filtered out as invalid. All three standard detection methods (EndGame, full defeat, majority defeated) produce no result.
+- **Fix**: Method 4 (last-build-activity) detects that the losing team (Left) stopped building at 92.1% of game duration while the winning team (Right) continued until 98.3% — a 6.2% gap exceeding the 5% threshold. Result: `LikelyRightTeam`.
+- **Key insight**: Spectator events are engine noise — spectators have no base, so the engine marks them as "defeated" immediately. This is NOT a dual player-numbering scheme; the engine uses standard all-slots numbering for both commands and events.
+
 ## Architecture
 
 ### Files
@@ -182,8 +213,8 @@ This needs further investigation across more replays with random-color players t
 |---------|---------|------------|
 | `LeftTeam` | Left side team won | Certain (EndGame or all-defeated) |
 | `RightTeam` | Right side team won | Certain (EndGame or all-defeated) |
-| `LikelyLeftTeam` | Left side likely won | Likely (majority-defeated heuristic) |
-| `LikelyRightTeam` | Right side likely won | Likely (majority-defeated heuristic) |
+| `LikelyLeftTeam` | Left side likely won | Likely (majority-defeated or last-build-activity heuristic) |
+| `LikelyRightTeam` | Right side likely won | Likely (majority-defeated or last-build-activity heuristic) |
 | `NotConcluded` | Game crashed/abandoned | N/A |
 | `Unknown` | Could not determine | N/A |
 
