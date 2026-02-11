@@ -153,6 +153,4 @@ pub async fn handle_component_interaction(
         Ok(msg) => tracing::info!("Sent followup batch {}", msg.id),
         Err(e) => tracing::error!("Failed to send followup: {}", e),
     }
-
-    super::handler::trim_memory();
 }

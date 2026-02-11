@@ -49,6 +49,8 @@ COPY --from=builder /app/assets /app/assets
 # Set environment variables
 ENV RUST_LOG=info
 ENV ASSETS_PATH=/app/assets
+ENV MALLOC_TRIM_THRESHOLD_=0
+ENV MALLOC_MMAP_THRESHOLD_=65536
 
 EXPOSE 8000
 

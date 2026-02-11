@@ -123,13 +123,13 @@ pub async fn setup_bot(token: String, assets_path: PathBuf) -> Result<(), Error>
         .build();
 
     // Disable all caching — this bot never reads from the cache
-    let mut cache_settings = serenity::cache::Settings::default();
+    /*   let mut cache_settings = serenity::cache::Settings::default();
     cache_settings.cache_guilds = false;
     cache_settings.cache_channels = false;
-    cache_settings.cache_users = false;
+    cache_settings.cache_users = false; */
 
     let mut client = serenity::ClientBuilder::new(token, intents)
-        .cache_settings(cache_settings)
+        //.cache_settings(cache_settings)
         .framework(framework)
         .await?;
 

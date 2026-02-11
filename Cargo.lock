@@ -524,7 +524,6 @@ dependencies = [
  "dotenvy",
  "image",
  "imageproc",
- "libc",
  "poise",
  "serenity",
  "tempfile",
