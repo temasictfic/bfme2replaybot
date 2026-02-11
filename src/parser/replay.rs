@@ -545,6 +545,12 @@ struct ChunkParseResult {
     positions: PositionData,
     combat: CombatResult,
     max_timecode: u32,
+    /// Last command timecode per player_num (for activity-based heuristic)
+    player_last_command_tc: HashMap<u32, u32>,
+    /// Last BUILD command (CMD_BUILD_OBJECT / CMD_BUILD_OBJECT_2) timecode per player_num.
+    /// More reliable than last_command_tc because losing teams still issue sell/demolish
+    /// commands near the end, but they stop *building* earlier.
+    player_last_build_tc: HashMap<u32, u32>,
 }
 
 /// Parse chunks and analyze for positions, factions, and winner
@@ -567,6 +573,8 @@ fn parse_and_analyze_chunks(
             has_endgame: false,
         },
         max_timecode: 0,
+        player_last_command_tc: HashMap::new(),
+        player_last_build_tc: HashMap::new(),
     };
 
     // Separate position tracking: build commands vs unit commands
@@ -588,6 +596,28 @@ fn parse_and_analyze_chunks(
                 }
             };
             let is_valid_player = header_players.iter().any(|hp| hp.slot == slot);
+
+            // Track last command timecode per player (for activity-based heuristic)
+            // Only track regular gameplay commands, not engine events
+            if is_valid_player
+                && chunk.order_type != CMD_PLAYER_DEFEATED
+                && chunk.order_type != CMD_END_GAME
+            {
+                result
+                    .player_last_command_tc
+                    .entry(chunk.player_num)
+                    .and_modify(|tc| *tc = (*tc).max(chunk.time_code))
+                    .or_insert(chunk.time_code);
+
+                // Track build commands separately (more reliable signal)
+                if chunk.order_type == CMD_BUILD_OBJECT || chunk.order_type == CMD_BUILD_OBJECT_2 {
+                    result
+                        .player_last_build_tc
+                        .entry(chunk.player_num)
+                        .and_modify(|tc| *tc = (*tc).max(chunk.time_code))
+                        .or_insert(chunk.time_code);
+                }
+            }
 
             // Process position-providing commands (1049, 1050, 1071)
             if is_valid_player
@@ -1051,6 +1081,61 @@ fn winner_from_majority_defeated(
     }
 }
 
+/// Try to determine winner from last-activity heuristic.
+///
+/// If one team stopped building significantly before the other team,
+/// the inactive team probably lost. This is useful for observer replays where
+/// engine events (EndGame/PlayerDefeated) may not map to real players.
+///
+/// Uses build commands (CMD_BUILD_OBJECT) as the signal instead of all commands,
+/// because losing teams still issue sell/demolish commands near the end of the
+/// game, but they stop *constructing* earlier.
+///
+/// Requirements:
+/// - Exactly 2 teams
+/// - Both teams must have issued at least one build command
+/// - The gap between teams' last build time must be > 5% of max_timecode
+fn winner_from_last_activity(
+    player_last_build_tc: &HashMap<u32, u32>,
+    team_players: &HashMap<i8, Vec<u32>>,
+    team_sides: &HashMap<i8, &'static str>,
+    max_timecode: u32,
+) -> Option<Winner> {
+    if team_players.len() != 2 || max_timecode == 0 {
+        return None;
+    }
+
+    let teams: Vec<i8> = team_players.keys().cloned().collect();
+
+    // Find latest build command timecode for each team
+    let team_last_build = |team: &i8| -> Option<u32> {
+        team_players[team]
+            .iter()
+            .filter_map(|pn| player_last_build_tc.get(pn))
+            .copied()
+            .max()
+    };
+
+    let last_a = team_last_build(&teams[0])?;
+    let last_b = team_last_build(&teams[1])?;
+
+    // Require a meaningful gap: > 5% of game duration
+    let gap_threshold = max_timecode / 20;
+    let gap = last_a.abs_diff(last_b);
+
+    if gap <= gap_threshold {
+        return None; // Not enough difference to be confident
+    }
+
+    if last_a > last_b {
+        // Team A was still building later → Team A probably won
+        team_sides.get(&teams[0]).map(|s| side_to_likely_winner(s))
+    } else {
+        // Team B was still building later → Team B probably won
+        team_sides.get(&teams[1]).map(|s| side_to_likely_winner(s))
+    }
+}
+
 /// Determine winner based on game events, using chained strategies
 fn determine_winner(
     parse_result: &ChunkParseResult,
@@ -1086,6 +1171,14 @@ fn determine_winner(
                 &parse_result.combat.defeated_players,
                 &team_players,
                 team_sides,
+            )
+        })
+        .or_else(|| {
+            winner_from_last_activity(
+                &parse_result.player_last_build_tc,
+                &team_players,
+                team_sides,
+                parse_result.max_timecode,
             )
         })
         .unwrap_or(Winner::Unknown)
