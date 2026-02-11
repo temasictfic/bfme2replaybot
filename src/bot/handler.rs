@@ -20,7 +20,9 @@ const MAX_ARCHIVE_BYTES: u64 = 25 * 1024 * 1024; // 25MB
 #[cfg(target_os = "linux")]
 pub fn trim_memory() {
     // SAFETY: malloc_trim is safe to call at any time.
-    unsafe { libc::malloc_trim(0); }
+    unsafe {
+        libc::malloc_trim(0);
+    }
 }
 
 #[cfg(not(target_os = "linux"))]
