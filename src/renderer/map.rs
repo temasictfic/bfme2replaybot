@@ -7,14 +7,9 @@ use std::path::Path;
 /// Load and prepare a map image from the assets directory (call once at startup)
 pub fn load_map_image(map_name: &str, assets_path: &Path) -> Result<RgbImage, String> {
     let map_path_jpg = assets_path.join("maps").join(format!("{}.jpg", map_name));
-    let map_path_png = assets_path.join("maps").join(format!("{}.png", map_name));
 
     let img = if map_path_jpg.exists() {
         image::open(&map_path_jpg)
-            .map(|img| img.to_rgb8())
-            .map_err(|e| format!("Failed to load map image: {}", e))?
-    } else if map_path_png.exists() {
-        image::open(&map_path_png)
             .map(|img| img.to_rgb8())
             .map_err(|e| format!("Failed to load map image: {}", e))?
     } else {
