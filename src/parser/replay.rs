@@ -75,6 +75,11 @@ struct HeaderPlayer {
     faction_id: i8,
     team_raw: i8,
     slot: u8,
+    /// Raw value of the 5th comma-separated field in the `S=` slot entry.
+    /// `-2` means observer/spectator; `-1` means random start position;
+    /// `0..7` is a chosen start position. Kept for diagnostic and future use.
+    #[allow(dead_code)]
+    startpos_raw: i8,
 }
 
 /// Result of a single-pass header parse
@@ -84,6 +89,15 @@ struct HeaderParseResult {
     spectators: Vec<String>,
     occupied_slots: Vec<u8>,
     chunks_start: Option<usize>,
+    /// Replay seed (the `SD=` header field). Used to deterministically reproduce
+    /// the game's random-color assignment.
+    sd: u32,
+    /// `(slot_index, color_id)` for each spectator/observer, in slot order.
+    /// Needed to accurately simulate PRNG consumption during color assignment
+    /// (observers consume one rand(0, num_starts-1) call for Phase 1 StartPos
+    /// and one rand(0, num_colors-1) retry loop for Phase 2 Color if their
+    /// color_id is -1).
+    observer_slots: Vec<(u8, i8)>,
 }
 
 /// Parse the header in a single pass: extract map name, players/spectators,
@@ -97,10 +111,18 @@ fn parse_header(data: &[u8]) -> Result<HeaderParseResult, ReplayError> {
     ))?;
 
     // Search full data for players/spectators
-    let (players, spectators, occupied_slots) = find_players_and_spectators_in(data);
+    let SlotScan {
+        players,
+        spectators,
+        occupied_slots,
+        observer_slots,
+    } = find_players_and_spectators_in(data);
 
     // Find chunks start: first null byte after the ;S= section
     let chunks_start = find_chunks_start(data);
+
+    // Extract the `SD=` seed field (decimal integer terminated by `;` or null).
+    let sd = find_header_u32_field(data, b";SD=").unwrap_or(0);
 
     Ok(HeaderParseResult {
         map_name,
@@ -108,7 +130,28 @@ fn parse_header(data: &[u8]) -> Result<HeaderParseResult, ReplayError> {
         spectators,
         occupied_slots,
         chunks_start,
+        sd,
+        observer_slots,
     })
+}
+
+/// Find a header field of the form `;KEY=decimal_digits;` and parse as u32.
+fn find_header_u32_field(data: &[u8], marker: &[u8]) -> Option<u32> {
+    for i in 0..data.len().saturating_sub(marker.len()) {
+        if &data[i..i + marker.len()] != marker {
+            continue;
+        }
+        let mut end = i + marker.len();
+        while end < data.len() && data[end].is_ascii_digit() {
+            end += 1;
+        }
+        if end > i + marker.len()
+            && let Ok(s) = std::str::from_utf8(&data[i + marker.len()..end])
+        {
+            return s.parse::<u32>().ok();
+        }
+    }
+    None
 }
 
 /// Find where chunks start (first null byte after the ;S= section)
@@ -161,8 +204,12 @@ pub fn parse_replay(data: &[u8]) -> Result<ReplayInfo, ReplayError> {
         .map(|(i, &slot)| ((i as u32) + 3, slot))
         .collect();
 
-    // Assign colors to players (including random color assignment)
-    assign_player_colors(&mut header_players);
+    // Assign colors to players (resolves random slots by replaying the game's PRNG)
+    assign_player_colors(
+        &mut header_players,
+        header_result.sd,
+        &header_result.observer_slots,
+    );
 
     // Build initial players list
     let mut players = build_players(&header_players);
@@ -301,13 +348,23 @@ fn decode_with_turkish_fallback(bytes: &[u8]) -> String {
     result
 }
 
+/// Output of [`find_players_and_spectators_in`]. `occupied_slots` holds the slot
+/// index of every non-empty entry (players AND spectators). `observer_slots`
+/// pairs each spectator's slot index with its `color_id`, for the random-color
+/// PRNG simulation.
+struct SlotScan {
+    players: Vec<HeaderPlayer>,
+    spectators: Vec<String>,
+    occupied_slots: Vec<u8>,
+    observer_slots: Vec<(u8, i8)>,
+}
+
 /// Find the S= section within a header slice and parse all players and spectators.
-/// Returns (players, spectator_names, occupied_slots) where occupied_slots
-/// contains the slot index of every non-empty entry (players AND spectators).
-fn find_players_and_spectators_in(header: &[u8]) -> (Vec<HeaderPlayer>, Vec<String>, Vec<u8>) {
+fn find_players_and_spectators_in(header: &[u8]) -> SlotScan {
     let mut players = Vec::new();
     let mut spectators = Vec::new();
     let mut occupied_slots = Vec::new();
+    let mut observer_slots: Vec<(u8, i8)> = Vec::new();
     let marker = b";S=";
 
     for i in 0..header.len().saturating_sub(marker.len()) {
@@ -340,6 +397,7 @@ fn find_players_and_spectators_in(header: &[u8]) -> (Vec<HeaderPlayer>, Vec<Stri
                             players.push(parsed);
                         } else {
                             // Spectator (team_raw is -1)
+                            observer_slots.push((slot_idx as u8, parsed.color_id));
                             spectators.push(parsed.name);
                         }
                     }
@@ -350,7 +408,12 @@ fn find_players_and_spectators_in(header: &[u8]) -> (Vec<HeaderPlayer>, Vec<Stri
         }
     }
 
-    (players, spectators, occupied_slots)
+    SlotScan {
+        players,
+        spectators,
+        occupied_slots,
+        observer_slots,
+    }
 }
 
 /// Parse player data from a slot string
@@ -388,6 +451,9 @@ fn parse_player_data(s: &str, slot: u8) -> Option<HeaderPlayer> {
     // Parse color_id (index 4)
     let color_id: i8 = parts.get(4).and_then(|s| s.parse().ok()).unwrap_or(-1);
 
+    // Parse startpos_raw (index 5) — -2 means observer, -1 random, 0..7 chosen
+    let startpos_raw: i8 = parts.get(5).and_then(|s| s.parse().ok()).unwrap_or(-1);
+
     // Parse faction_id (index 6)
     let faction_id: i8 = parts.get(6).and_then(|s| s.parse().ok()).unwrap_or(-1);
 
@@ -401,77 +467,90 @@ fn parse_player_data(s: &str, slot: u8) -> Option<HeaderPlayer> {
         faction_id,
         team_raw,
         slot,
+        startpos_raw,
     })
 }
 
-/// Assign colors to players, handling random color assignment
-fn assign_player_colors(players: &mut [HeaderPlayer]) {
-    let mut used_colors: HashSet<i8> = HashSet::new();
+/// Resolve random-color slots by replaying the game's deterministic RNG stream.
+///
+/// Mirrors `FUN_00647c1d` → `FUN_006443b6` → (`FUN_00643f62`, `FUN_00643bc4`)
+/// in `game.dat`. Verified 9/9 against live replays via Frida runtime trace;
+/// see `RANDOM_COLOR_REVERSE_ENGINEERING.md` and `simulate_final.py`.
+///
+/// `players` contains only non-observer slots (team_raw >= 0) in whatever order
+/// the header produced. `observer_slots` gives `(slot_index, color_id)` for
+/// each observer so their PRNG consumption is simulated in the correct order.
+fn assign_player_colors(players: &mut [HeaderPlayer], sd: u32, observer_slots: &[(u8, i8)]) {
+    use super::prng::Bfme2Rand;
 
-    // First pass: collect used colors
-    for player in players.iter() {
-        if player.color_id >= 0 {
-            used_colors.insert(player.color_id);
+    const NUM_COLORS: i32 = 10;
+    const NUM_STARTS: i32 = 6; // wor rhun 6-player map
+
+    let mut r = Bfme2Rand::new(sd);
+    let mod7 = (sd % 7) as usize;
+
+    // Build slot_index → players[] index for non-observer slots.
+    let mut by_slot: [Option<usize>; 8] = [None; 8];
+    for (idx, p) in players.iter().enumerate() {
+        if (p.slot as usize) < 8 {
+            by_slot[p.slot as usize] = Some(idx);
         }
     }
 
-    // Find the best gap for random color assignment
-    let (gap_start, gap_end, gap_len) = find_best_gap(&used_colors);
+    // Build set of observer slot indices with their color_id for Phase 2 simulation.
+    let mut observer_by_slot: [Option<i8>; 8] = [None; 8];
+    for &(slot, color) in observer_slots {
+        if (slot as usize) < 8 {
+            observer_by_slot[slot as usize] = Some(color);
+        }
+    }
 
-    // Determine starting color based on gap size
-    let mut next_color = if gap_len >= 3 { gap_start } else { gap_end };
+    // --- Phase 1 (StartPos) ---
+    // Each observer consumes one rand(0, num_starts-1) call (accepts any taken
+    // position; observer overlays a player's start spot).
+    for _ in 0..observer_slots.len() {
+        let _ = r.logic_random(0, NUM_STARTS - 1);
+    }
 
-    // Second pass: assign random colors
-    // Process in slot order (already sorted by slot)
-    for player in players.iter_mut() {
-        if player.color_id == -1 {
-            // Find next available color
-            for offset in 0..10 {
-                let color_id = ((next_color as i16 + offset) % 10) as i8;
-                if !used_colors.contains(&color_id) {
-                    player.color_id = color_id;
-                    used_colors.insert(color_id);
-                    next_color = (color_id + 1) % 10;
-                    break;
-                }
+    // --- Phase 2 (Color + Faction) --- iterate slots 0..7 in order.
+    let mut taken: HashSet<i8> = HashSet::new();
+    for idx in by_slot.iter().flatten() {
+        if players[*idx].color_id >= 0 {
+            taken.insert(players[*idx].color_id);
+        }
+    }
+
+    for slot_idx in 0..8 {
+        if let Some(pidx) = by_slot[slot_idx] {
+            // Non-observer playing slot: one faction-loop iteration
+            // (mod7 warmup rand(0,1) calls + one rand(0,1000) faction pick).
+            for _ in 0..mod7 {
+                let _ = r.logic_random(0, 1);
+            }
+            let _ = r.logic_random(0, 1000);
+
+            if players[pidx].color_id == -1 {
+                let picked = pick_untaken_color(&mut r, &taken, NUM_COLORS);
+                players[pidx].color_id = picked;
+                taken.insert(picked);
+            }
+        } else if let Some(obs_color) = observer_by_slot[slot_idx] {
+            // Observer: no faction loop; color retry if color_id == -1.
+            if obs_color == -1 {
+                let picked = pick_untaken_color(&mut r, &taken, NUM_COLORS);
+                taken.insert(picked);
             }
         }
     }
 }
 
-/// Find the largest contiguous gap in available colors (0-8, excluding 9/white)
-fn find_best_gap(used: &HashSet<i8>) -> (i8, i8, i8) {
-    let available: Vec<i8> = (0..9).filter(|c| !used.contains(c)).collect();
-    if available.is_empty() {
-        return (0, 0, 0);
-    }
-
-    let mut gaps: Vec<(i8, i8, i8)> = Vec::new();
-    let mut current_start = available[0];
-    let mut current_end = available[0];
-
-    for i in 1..available.len() {
-        if available[i] == available[i - 1] + 1 {
-            current_end = available[i];
-        } else {
-            gaps.push((current_start, current_end, current_end - current_start + 1));
-            current_start = available[i];
-            current_end = available[i];
+fn pick_untaken_color(r: &mut super::prng::Bfme2Rand, taken: &HashSet<i8>, num_colors: i32) -> i8 {
+    loop {
+        let c = r.logic_random(0, num_colors - 1) as i8;
+        if !taken.contains(&c) {
+            return c;
         }
     }
-    gaps.push((current_start, current_end, current_end - current_start + 1));
-
-    // Sort by length (desc), then by end position (desc) for ties
-    gaps.sort_by(|a, b| {
-        let len_cmp = b.2.cmp(&a.2);
-        if len_cmp == std::cmp::Ordering::Equal {
-            b.1.cmp(&a.1)
-        } else {
-            len_cmp
-        }
-    });
-
-    gaps.first().cloned().unwrap_or((0, 0, 0))
 }
 
 /// Build Player structs from header data
@@ -1226,16 +1305,42 @@ mod tests {
         assert_eq!(infer_faction_from_building(2140), Some(Faction::Mordor));
     }
 
+    /// Verified against the live 3dwarf replay via Frida trace.
+    /// Ground truth: mustafaa (slot 1) resolves to color 9 (White),
+    /// Gusto (slot 7) resolves to color 1 (Red).
     #[test]
-    fn test_find_best_gap() {
-        let mut used = HashSet::new();
-        used.insert(0);
-        used.insert(1);
-        // Available: 2,3,4,5,6,7,8 - gap from 2 to 8
-        let (start, end, len) = find_best_gap(&used);
-        assert_eq!(start, 2);
-        assert_eq!(end, 8);
-        assert_eq!(len, 7);
+    fn test_assign_player_colors_3dwarf() {
+        fn p(name: &str, slot: u8, color: i8, faction: i8, team: i8) -> HeaderPlayer {
+            HeaderPlayer {
+                name: name.into(),
+                uid: None,
+                color_id: color,
+                faction_id: faction,
+                team_raw: team,
+                slot,
+                startpos_raw: -1,
+            }
+        }
+        // 3dwarf occupied_slots: 0..7. Slots 5 and 6 are observers.
+        let mut players = vec![
+            p("ALPHA", 0, 7, 0, 1),
+            p("mustafaa", 1, -1, 2, 3),
+            p("SuperNova", 2, 0, 1, 3),
+            p("C__", 3, 6, -1, 1),
+            p("AKINCI", 4, 2, 3, 1),
+            p("Gusto", 7, -1, 4, 3),
+        ];
+        // Observers: slot 5 k$ln$, slot 6 Bullet, both with color_id=-1
+        let observers = vec![(5u8, -1i8), (6u8, -1i8)];
+        assign_player_colors(&mut players, 442_667_640, &observers);
+
+        let get_color = |name: &str| players.iter().find(|p| p.name == name).unwrap().color_id;
+        assert_eq!(
+            get_color("mustafaa"),
+            9,
+            "mustafaa should resolve to White (9)"
+        );
+        assert_eq!(get_color("Gusto"), 1, "Gusto should resolve to Red (1)");
     }
 
     #[test]
@@ -1342,6 +1447,7 @@ mod tests {
                 color_id: 0,
                 faction_id: 0,
                 team_raw: 0,
+                startpos_raw: -1,
             },
             HeaderPlayer {
                 name: "RightPlayer".to_string(),
@@ -1350,6 +1456,7 @@ mod tests {
                 color_id: 1,
                 faction_id: 1,
                 team_raw: 1,
+                startpos_raw: -1,
             },
         ];
 
@@ -1384,6 +1491,7 @@ mod tests {
                 color_id: 0,
                 faction_id: 0,
                 team_raw: 0,
+                startpos_raw: -1,
             },
             HeaderPlayer {
                 name: "RightPlayer".to_string(),
@@ -1392,6 +1500,7 @@ mod tests {
                 color_id: 1,
                 faction_id: 1,
                 team_raw: 1,
+                startpos_raw: -1,
             },
         ];
 
