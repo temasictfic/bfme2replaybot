@@ -15,9 +15,9 @@ pub enum Faction {
 }
 
 impl Faction {
-    /// Convert faction ID from replay file to Faction enum
+    /// Convert faction ID from replay file to Faction enum.
     /// Note: For players who picked "Random" in lobby, this returns their
-    /// lobby selection, NOT their actual in-game faction
+    /// lobby selection, NOT their actual in-game faction.
     pub fn from_id(id: i8) -> Self {
         match id {
             -1 => Faction::Random,
@@ -30,6 +30,21 @@ impl Faction {
             6 => Faction::Angmar,
             n if n >= 0 => Faction::Unknown(n as u8),
             _ => Faction::Random,
+        }
+    }
+
+    /// Convert a PlayerTemplate registration index (from the PRNG random-faction pool)
+    /// to the actual in-game faction. Verified 6/6 via Frida runtime trace +
+    /// cross-referenced with played factions across all ground-truth replays.
+    pub fn from_template_id(id: i32) -> Option<Self> {
+        match id {
+            3 => Some(Faction::Men),
+            5 => Some(Faction::Elves),
+            6 => Some(Faction::Dwarves),
+            7 => Some(Faction::Isengard),
+            8 => Some(Faction::Mordor),
+            9 => Some(Faction::Goblins),
+            _ => None,
         }
     }
 }

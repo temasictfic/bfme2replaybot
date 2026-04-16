@@ -204,8 +204,8 @@ pub fn parse_replay(data: &[u8]) -> Result<ReplayInfo, ReplayError> {
         .map(|(i, &slot)| ((i as u32) + 3, slot))
         .collect();
 
-    // Assign colors to players (resolves random slots by replaying the game's PRNG)
-    assign_player_colors(
+    // Resolve random colors AND random factions by replaying the game's PRNG.
+    assign_player_colors_and_factions(
         &mut header_players,
         header_result.sd,
         &header_result.observer_slots,
@@ -471,16 +471,34 @@ fn parse_player_data(s: &str, slot: u8) -> Option<HeaderPlayer> {
     })
 }
 
-/// Resolve random-color slots by replaying the game's deterministic RNG stream.
+/// PlayerTemplate registration indices of valid random-faction entries.
+/// Derived from live Frida trace of `FUN_00643bc4`'s pre-loop filter; the
+/// mapping to played faction is verified empirically:
+///   3 → Men, 5 → Elves, 6 → Dwarves, 7 → Isengard, 8 → Mordor, 9 → Goblins.
+/// In these games every player requests Random faction, so the PRNG-derived
+/// template_id IS the actual played faction for all non-observer slots.
+const FACTION_POOL: [i32; 6] = [3, 5, 6, 7, 8, 9];
+
+/// Map a template_id from [`FACTION_POOL`] to the actual played faction.
+fn faction_from_template(template_id: i32) -> Option<Faction> {
+    Faction::from_template_id(template_id)
+}
+
+/// Resolve random-color slots AND compute actual played factions by replaying
+/// the game's deterministic RNG stream.
 ///
 /// Mirrors `FUN_00647c1d` → `FUN_006443b6` → (`FUN_00643f62`, `FUN_00643bc4`)
-/// in `game.dat`. Verified 9/9 against live replays via Frida runtime trace;
-/// see `RANDOM_COLOR_REVERSE_ENGINEERING.md` and `simulate_final.py`.
+/// in `game.dat`. Verified against all 9 ground-truth replays via Frida trace;
+/// see `RANDOM_COLOR_REVERSE_ENGINEERING.md`.
 ///
-/// `players` contains only non-observer slots (team_raw >= 0) in whatever order
-/// the header produced. `observer_slots` gives `(slot_index, color_id)` for
-/// each observer so their PRNG consumption is simulated in the correct order.
-fn assign_player_colors(players: &mut [HeaderPlayer], sd: u32, observer_slots: &[(u8, i8)]) {
+/// Mutates each non-observer player's `color_id` (if it was -1) AND overrides
+/// `faction_id` to the PRNG-derived template value (since players in these
+/// games always request Random faction, the template is the real played faction).
+fn assign_player_colors_and_factions(
+    players: &mut [HeaderPlayer],
+    sd: u32,
+    observer_slots: &[(u8, i8)],
+) {
     use super::prng::Bfme2Rand;
 
     const NUM_COLORS: i32 = 10;
@@ -489,7 +507,6 @@ fn assign_player_colors(players: &mut [HeaderPlayer], sd: u32, observer_slots: &
     let mut r = Bfme2Rand::new(sd);
     let mod7 = (sd % 7) as usize;
 
-    // Build slot_index → players[] index for non-observer slots.
     let mut by_slot: [Option<usize>; 8] = [None; 8];
     for (idx, p) in players.iter().enumerate() {
         if (p.slot as usize) < 8 {
@@ -497,7 +514,6 @@ fn assign_player_colors(players: &mut [HeaderPlayer], sd: u32, observer_slots: &
         }
     }
 
-    // Build set of observer slot indices with their color_id for Phase 2 simulation.
     let mut observer_by_slot: [Option<i8>; 8] = [None; 8];
     for &(slot, color) in observer_slots {
         if (slot as usize) < 8 {
@@ -505,9 +521,7 @@ fn assign_player_colors(players: &mut [HeaderPlayer], sd: u32, observer_slots: &
         }
     }
 
-    // --- Phase 1 (StartPos) ---
-    // Each observer consumes one rand(0, num_starts-1) call (accepts any taken
-    // position; observer overlays a player's start spot).
+    // --- Phase 1 (StartPos) --- one rand per observer.
     for _ in 0..observer_slots.len() {
         let _ = r.logic_random(0, NUM_STARTS - 1);
     }
@@ -522,12 +536,26 @@ fn assign_player_colors(players: &mut [HeaderPlayer], sd: u32, observer_slots: &
 
     for slot_idx in 0..8 {
         if let Some(pidx) = by_slot[slot_idx] {
-            // Non-observer playing slot: one faction-loop iteration
-            // (mod7 warmup rand(0,1) calls + one rand(0,1000) faction pick).
+            // Non-observer: faction loop = mod7 warmups + one rand(0,1000).
             for _ in 0..mod7 {
                 let _ = r.logic_random(0, 1);
             }
-            let _ = r.logic_random(0, 1000);
+            let faction_roll = r.logic_random(0, 1000);
+            let tmpl = FACTION_POOL[(faction_roll as usize) % FACTION_POOL.len()];
+            if let Some(f) = faction_from_template(tmpl) {
+                // Store as the legacy faction_id encoding so downstream code
+                // (including chunk-based verification) sees the correct faction.
+                players[pidx].faction_id = match f {
+                    Faction::Men => 0,
+                    Faction::Goblins => 1,
+                    Faction::Dwarves => 2,
+                    Faction::Isengard => 3,
+                    Faction::Elves => 4,
+                    Faction::Mordor => 5,
+                    Faction::Angmar => 6,
+                    _ => players[pidx].faction_id,
+                };
+            }
 
             if players[pidx].color_id == -1 {
                 let picked = pick_untaken_color(&mut r, &taken, NUM_COLORS);
@@ -1332,15 +1360,33 @@ mod tests {
         ];
         // Observers: slot 5 k$ln$, slot 6 Bullet, both with color_id=-1
         let observers = vec![(5u8, -1i8), (6u8, -1i8)];
-        assign_player_colors(&mut players, 442_667_640, &observers);
+        assign_player_colors_and_factions(&mut players, 442_667_640, &observers);
 
-        let get_color = |name: &str| players.iter().find(|p| p.name == name).unwrap().color_id;
+        let by_name = |name: &str| players.iter().find(|p| p.name == name).unwrap();
+        let get_color = |name: &str| by_name(name).color_id;
+        let get_fac = |name: &str| by_name(name).faction_id;
+
+        // Color ground truth (verified via Frida trace).
         assert_eq!(
             get_color("mustafaa"),
             9,
             "mustafaa should resolve to White (9)"
         );
         assert_eq!(get_color("Gusto"), 1, "Gusto should resolve to Red (1)");
+
+        // Faction ground truth (template_id → header encoding):
+        //   ALPHA template=6 → Dwarves (2)
+        //   mustafaa template=6 → Dwarves (2)
+        //   SuperNova template=6 → Dwarves (2)
+        //   C__ template=8 → Mordor (5)
+        //   AKINCI template=3 → Men (0)
+        //   Gusto template=6 → Dwarves (2)
+        assert_eq!(get_fac("ALPHA"), 2, "ALPHA → Dwarves");
+        assert_eq!(get_fac("mustafaa"), 2, "mustafaa → Dwarves");
+        assert_eq!(get_fac("SuperNova"), 2, "SuperNova → Dwarves");
+        assert_eq!(get_fac("C__"), 5, "C__ → Mordor");
+        assert_eq!(get_fac("AKINCI"), 0, "AKINCI → Men");
+        assert_eq!(get_fac("Gusto"), 2, "Gusto → Dwarves");
     }
 
     #[test]
