@@ -6,3 +6,5 @@ __pycache__/
 *.pyd
 *.py
 *.txt
+!render_map.py
+!check_replay.py

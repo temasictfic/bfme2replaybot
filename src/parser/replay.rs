@@ -522,6 +522,25 @@ fn assign_player_colors_and_factions(
     }
 
     // --- Phase 1 (StartPos) --- one rand per observer.
+    //
+    // NOTE (2026-04-18): this assumption is specifically "observer count"
+    // and empirically matches ALL 9 ground-truth replays. But it is NOT the
+    // game's general algorithm — `FUN_00643f62` actually does three loops:
+    //   1. Mark concrete start positions.
+    //   2. For non-observer slots with start_pos=-1:
+    //      - first such slot rolls `rand(0, num_starts-1)` once with retry;
+    //      - subsequent random-start slots use a non-RNG distance-based pick.
+    //   3. For observer slots passing `FUN_007fde60` (slot type ∈ {2,3,4,5,6}
+    //      AND `+0x1A4 != 0`) AND `template_id == -2`, roll
+    //      `rand(0, num_starts-1)` until an ALREADY-TAKEN position is drawn.
+    //
+    // For live lobbies (e.g. 6-player wor-rhun with every slot's start_pos
+    // chosen manually), Phase 1 actually consumes zero RNG — see
+    // `bfme2-factionforge/SD_RESEARCH.md` "Session 2026-04-18".
+    //
+    // Replay files in this project happen to all have random start_pos and
+    // 2 observers, so `observer_slots.len()` = 2 matches the 2 rolls in
+    // Frida traces. Don't change this without re-validating all 9 replays.
     for _ in 0..observer_slots.len() {
         let _ = r.logic_random(0, NUM_STARTS - 1);
     }
