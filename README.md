@@ -1,6 +1,6 @@
 # DCReplayBot
 
-A Discord bot that parses **Battle for Middle-earth II: Rise of the Witch King** replay files and renders a visual map summary.
+A Discord bot that parses **Battle for Middle-earth II 1.00** replay files and renders a visual map summary.
 
 Upload a `.BfME2Replay` file (or a `.zip`/`.rar` archive of replays), @mention the bot, and it responds with a rendered map image showing player positions, factions, colors, game duration, and winner.
 
